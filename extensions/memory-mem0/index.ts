@@ -784,13 +784,14 @@ const mem0Plugin = {
     // Lifecycle Hooks
     // ========================================================================
 
-    // Always inject system prompt guidance so the agent knows about memory tools.
-    // Conditionally include auto-recall (memory search) when autoRecall is enabled.
+    // Inject system prompt guidance (so the agent knows about memory tools) via
+    // prependContext — the only hook return field the runner actually consumes.
+    // When autoRecall is enabled, also inject relevant recalled memories.
     api.on("before_agent_start", async (event) => {
+      const contextParts: string[] = [];
+
       // Always provide system prompt guidance for memory tools
-      const result: { systemPrompt: string; prependContext?: string } = {
-        systemPrompt: MEM0_SYSTEM_PROMPT,
-      };
+      contextParts.push(MEM0_SYSTEM_PROMPT);
 
       // Auto-recall: search for relevant memories and inject as context
       if (cfg.autoRecall && event.prompt && event.prompt.length >= 5) {
@@ -843,14 +844,16 @@ const mem0Plugin = {
               `memory-mem0: injecting ${memoryLines.length} memories (${memoryContext.length} chars) into context`,
             );
 
-            result.prependContext = `<relevant-memories>\nThe following memories may be relevant to this conversation:\n${memoryContext}\n</relevant-memories>`;
+            contextParts.push(
+              `<relevant-memories>\nThe following memories may be relevant to this conversation:\n${memoryContext}\n</relevant-memories>`,
+            );
           }
         } catch (err) {
           api.logger.warn(`memory-mem0: recall failed: ${String(err)}`);
         }
       }
 
-      return result;
+      return { prependContext: contextParts.join("\n\n") };
     });
 
     // Auto-capture: analyze and store important user messages after agent ends
