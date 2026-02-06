@@ -1,0 +1,17 @@
+{
+  "name": "@openclaw/memory-mem0",
+  "version": "2026.2.4",
+  "description": "OpenClaw mem0-backed multi-tier memory plugin (Redis short-term + Qdrant vector + Neo4j graph)",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
