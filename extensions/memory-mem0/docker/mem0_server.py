@@ -475,19 +475,20 @@ async def search_memories(request: SearchRequest):
     # Search long-term memory (Qdrant + Neo4j)
     if memory:
         try:
-            filters = {}
+            # mem0's search() requires user_id/agent_id/run_id as direct kwargs
+            # (not inside a filters dict) — same pattern as memory.add().
+            search_kwargs = {
+                "query": request.query,
+                "limit": request.limit,
+            }
             if request.user_id:
-                filters["user_id"] = request.user_id
+                search_kwargs["user_id"] = request.user_id
             if request.agent_id:
-                filters["agent_id"] = request.agent_id
+                search_kwargs["agent_id"] = request.agent_id
             if request.session_id:
-                filters["run_id"] = request.session_id
+                search_kwargs["run_id"] = request.session_id
 
-            long_term = memory.search(
-                query=request.query,
-                limit=request.limit,
-                filters=filters if filters else None,
-            )
+            long_term = memory.search(**search_kwargs)
 
             for r in long_term.get("results", []):
                 results.append(MemoryResponse(
