@@ -1,0 +1,144 @@
+# mem0 Memory Stack for OpenClaw
+# Usage: docker-compose up -d
+# Test: curl http://localhost:8080/health
+
+version: "3.8"
+
+services:
+  # Postgres for structured data (history, metadata, config)
+  postgres:
+    image: postgres:16-alpine
+    container_name: mem0-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=mem0
+      - POSTGRES_PASSWORD=mem0password
+      - POSTGRES_DB=mem0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mem0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Redis Stack for short-term/working memory (fast cache layer)
+  redis:
+    image: redis/redis-stack:latest
+    container_name: mem0-redis
+    ports:
+      - "6379:6379" # Redis
+      - "8001:8001" # RedisInsight UI
+    volumes:
+      - ./data/redis:/data
+    environment:
+      - REDIS_ARGS=--save 60 1 --loglevel warning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Vector database for long-term embeddings
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: mem0-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+    # Qdrant health checked via API - container is reliable
+    # healthcheck disabled due to minimal container (no curl/wget)
+
+  # Graph database for relationship memory
+  neo4j:
+    image: neo4j:5-community
+    container_name: mem0-neo4j
+    ports:
+      - "7474:7474" # HTTP
+      - "7687:7687" # Bolt
+    volumes:
+      - ./data/neo4j/data:/data
+      - ./data/neo4j/logs:/logs
+    environment:
+      - NEO4J_AUTH=neo4j/mem0password
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # mem0 REST API server
+  mem0-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.mem0
+    container_name: mem0-api
+    ports:
+      - "8080:8080"
+    environment:
+      # LLM provider/model for fact extraction (configurable)
+      - MEM0_LLM_PROVIDER=${MEM0_LLM_PROVIDER:-openai}
+      - MEM0_LLM_MODEL=${MEM0_LLM_MODEL:-gpt-4o-mini}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+
+      # Embedder provider/model (configurable)
+      - MEM0_EMBEDDER_PROVIDER=${MEM0_EMBEDDER_PROVIDER:-openai}
+      - MEM0_EMBEDDER_MODEL=${MEM0_EMBEDDER_MODEL:-text-embedding-3-small}
+      - MEM0_EMBEDDING_DIMS=${MEM0_EMBEDDING_DIMS:-1536}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+
+      # Postgres connection (history, metadata, structured data)
+      - DATABASE_URL=postgresql://mem0:mem0password@postgres:5432/mem0
+
+      # Redis connection (short-term/working memory)
+      - REDIS_URL=redis://redis:6379
+
+      # Qdrant connection (long-term vector memory)
+      - MEM0_VECTOR_STORE=qdrant
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+
+      # Neo4j connection (graph/relationship memory)
+      - MEM0_GRAPH_STORE=neo4j
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=mem0password
+
+      # API settings
+      - MEM0_API_HOST=0.0.0.0
+      - MEM0_API_PORT=8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# Volumes mapped to local filesystem for easy backup and visibility
+# All data stored in: ~/.openclaw/workspace/memory/data/
+
+networks:
+  default:
+    name: mem0-network

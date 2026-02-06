@@ -1,0 +1,30 @@
+# mem0 API Server
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install mem0 with all extras
+RUN pip install --no-cache-dir \
+    mem0ai \
+    fastapi \
+    uvicorn[standard] \
+    neo4j \
+    qdrant-client \
+    redis \
+    psycopg2-binary \
+    sqlalchemy \
+    langchain-neo4j \
+    rank-bm25 \
+    ollama
+
+# Copy server (config built dynamically from env vars)
+COPY mem0_server.py /app/server.py
+
+EXPOSE 8080
+
+CMD ["python", "server.py"]

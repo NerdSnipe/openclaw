@@ -1,0 +1,80 @@
+{
+  "id": "memory-mem0",
+  "kind": "memory",
+  "uiHints": {
+    "apiUrl": {
+      "label": "Mem0 API URL",
+      "placeholder": "http://localhost:8080",
+      "help": "URL of the mem0-api Docker service (or use ${MEM0_API_URL})"
+    },
+    "userId": {
+      "label": "Default User ID",
+      "placeholder": "default",
+      "help": "User ID for scoping memories (defaults to agent session user)"
+    },
+    "agentId": {
+      "label": "Default Agent ID",
+      "placeholder": "openclaw",
+      "help": "Agent ID for agent-scoped private memories"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture important information from conversations"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories into context"
+    },
+    "autoPromote": {
+      "label": "Auto-Promote",
+      "help": "Automatically promote frequently accessed memories to long-term storage",
+      "advanced": true
+    },
+    "searchDefaults.limit": {
+      "label": "Search Limit",
+      "placeholder": "5",
+      "advanced": true
+    },
+    "searchDefaults.threshold": {
+      "label": "Relevance Threshold",
+      "placeholder": "0.3",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiUrl": {
+        "type": "string"
+      },
+      "userId": {
+        "type": "string"
+      },
+      "agentId": {
+        "type": "string"
+      },
+      "autoCapture": {
+        "type": "boolean"
+      },
+      "autoRecall": {
+        "type": "boolean"
+      },
+      "autoPromote": {
+        "type": "boolean"
+      },
+      "searchDefaults": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "number"
+          },
+          "threshold": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  }
+}
