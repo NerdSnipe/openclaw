@@ -113,6 +113,10 @@ When `autoCapture` is enabled, the plugin analyzes conversation messages after e
 
 When `autoPromote` is enabled, memories accessed 3+ times in Redis short-term storage are automatically promoted to Qdrant vector and Neo4j graph long-term storage.
 
+## Migrating Workspace Memory
+
+See [MIGRATION.md](./MIGRATION.md) for a complete guide on migrating your existing workspace memories (`MEMORY.md`, `memory/*.md`) into mem0 — both via automated CLI and agent-driven approaches.
+
 ## Notes
 
 - Only one memory plugin can be active at a time (`plugins.slots.memory`). Set to `"memory-mem0"` to use this plugin instead of the default.

@@ -330,7 +330,7 @@ const mem0Plugin = {
     // ========================================================================
 
     api.registerCli(
-      ({ program }) => {
+      ({ program, workspaceDir: cliWorkspaceDir }) => {
         const mem0 = program.command("mem0").description("Mem0 memory plugin commands");
 
         mem0
@@ -462,6 +462,83 @@ const mem0Plugin = {
               console.error(`Failed to stop Docker stack: ${String(err)}`);
             }
           });
+
+        mem0
+          .command("migrate")
+          .description("Migrate workspace memory files (MEMORY.md + memory/*.md) into mem0")
+          .option("--workspace <dir>", "Workspace directory (default: auto-detect)")
+          .option("--dry-run", "Preview without sending", false)
+          .option("--skip-backup", "Skip creating backup files", false)
+          .option("--archive", "Move daily files to memory/archive/", false)
+          .option("--keep-memory-md", "Don't rewrite MEMORY.md after migration", false)
+          .option("--batch-size <n>", "Chunks per batch", "5")
+          .option("--delay <ms>", "Delay between batches (ms)", "500")
+          .option("--scope <scope>", "Memory scope: user or agent", "user")
+          .option("--verbose", "Show detailed progress", false)
+          .action(
+            async (opts: {
+              workspace?: string;
+              dryRun: boolean;
+              skipBackup: boolean;
+              archive: boolean;
+              keepMemoryMd: boolean;
+              batchSize: string;
+              delay: string;
+              scope: string;
+              verbose: boolean;
+            }) => {
+              const { resolve } = await import("node:path");
+              const { runMigration } = await import("./migrate.js");
+
+              const workspaceDir = opts.workspace ? resolve(opts.workspace) : cliWorkspaceDir;
+              if (!workspaceDir) {
+                console.error("Could not determine workspace directory. Use --workspace <dir>.");
+                process.exitCode = 1;
+                return;
+              }
+
+              // Health check first
+              try {
+                await client.health();
+              } catch {
+                console.error(
+                  `mem0-api not reachable at ${cfg.apiUrl}. Start with: openclaw mem0 docker-up`,
+                );
+                process.exitCode = 1;
+                return;
+              }
+
+              const result = await runMigration({
+                workspaceDir,
+                client,
+                userId: opts.scope === "agent" ? "" : (cfg.userId ?? "default"),
+                agentId: opts.scope === "agent" ? (cfg.agentId ?? "openclaw") : "",
+                dryRun: opts.dryRun,
+                skipBackup: opts.skipBackup,
+                archive: opts.archive,
+                keepMemoryMd: opts.keepMemoryMd,
+                batchSize: parseInt(opts.batchSize),
+                delayMs: parseInt(opts.delay),
+                verbose: opts.verbose,
+                logger: { info: console.log, warn: console.warn, error: console.error },
+              });
+
+              console.log(`\nMigration ${opts.dryRun ? "(dry run) " : ""}complete:`);
+              console.log(`  Files processed: ${result.filesProcessed}`);
+              console.log(`  Files skipped:   ${result.filesSkipped}`);
+              console.log(`  Chunks total:    ${result.chunksTotal}`);
+              console.log(`  Chunks sent:     ${result.chunksSent}`);
+              console.log(`  Chunks failed:   ${result.chunksFailed}`);
+              if (result.errors.length > 0) {
+                console.error(`  Errors: ${result.errors.length}`);
+                if (opts.verbose) {
+                  for (const err of result.errors) {
+                    console.error(`    - ${err}`);
+                  }
+                }
+              }
+            },
+          );
       },
       { commands: ["mem0"] },
     );

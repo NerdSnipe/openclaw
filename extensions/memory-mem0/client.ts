@@ -224,6 +224,60 @@ export class Mem0ApiClient {
     });
   }
 
+  // ---- Batch Operations ----
+
+  /**
+   * Send multiple memory chunks with rate limiting.
+   * Calls addMemory() for each chunk in batches with configurable delay.
+   */
+  async addMemoryBatch(params: {
+    chunks: Array<{ text: string; metadata?: Record<string, unknown> }>;
+    userId?: string;
+    agentId?: string;
+    batchSize?: number;
+    delayMs?: number;
+    onProgress?: (completed: number, total: number) => void;
+  }): Promise<{ succeeded: number; failed: number; errors: string[] }> {
+    const batchSize = params.batchSize ?? 5;
+    const delayMs = params.delayMs ?? 500;
+    let succeeded = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (let i = 0; i < params.chunks.length; i += batchSize) {
+      const batch = params.chunks.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map((chunk) =>
+          this.addMemory({
+            messages: [{ role: "user", content: chunk.text }],
+            userId: params.userId,
+            agentId: params.agentId,
+            metadata: chunk.metadata,
+          }),
+        ),
+      );
+
+      for (const result of results) {
+        if (result.status === "fulfilled" && result.value.success) {
+          succeeded++;
+        } else {
+          failed++;
+          errors.push(
+            result.status === "rejected" ? String(result.reason) : "API returned success=false",
+          );
+        }
+      }
+
+      params.onProgress?.(Math.min(i + batch.length, params.chunks.length), params.chunks.length);
+
+      if (i + batchSize < params.chunks.length && delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    return { succeeded, failed, errors };
+  }
+
   // ---- Private HTTP helper ----
 
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
