@@ -7,6 +7,7 @@
 
 import { describe, test, expect } from "vitest";
 import { mem0ConfigSchema } from "./config.js";
+import { detectCategory, truncateAtSentence } from "./index.js";
 
 // Live test gate
 const liveEnabled = process.env.MEM0_LIVE_TEST === "1";
@@ -264,6 +265,124 @@ describe("memory-mem0 plugin", () => {
         expect(matches, `expected "${text}" to be capturable`).toBe(true);
       }
     }
+  });
+});
+
+// ============================================================================
+// Config: capture + recall parsing
+// ============================================================================
+
+describe("config schema: capture + recall", () => {
+  test("parses custom capture and recall values", () => {
+    const config = mem0ConfigSchema.parse({
+      capture: { maxMemoryChars: 200, maxPerConversation: 5, categorize: false },
+      recall: { limit: 5, maxContextChars: 2000, timeoutMs: 5000, minScore: 0.5 },
+    });
+    expect(config.capture.maxMemoryChars).toBe(200);
+    expect(config.capture.maxPerConversation).toBe(5);
+    expect(config.capture.categorize).toBe(false);
+    expect(config.recall.limit).toBe(5);
+    expect(config.recall.maxContextChars).toBe(2000);
+    expect(config.recall.timeoutMs).toBe(5000);
+    expect(config.recall.minScore).toBe(0.5);
+    expect(config.recall.includeCategory).toBe(true);
+  });
+
+  test("defaults capture and recall when absent", () => {
+    const config = mem0ConfigSchema.parse({});
+    expect(config.capture.maxMemoryChars).toBe(300);
+    expect(config.capture.maxPerConversation).toBe(3);
+    expect(config.capture.categorize).toBe(true);
+    expect(config.recall.limit).toBe(3);
+    expect(config.recall.maxContextChars).toBe(1500);
+    expect(config.recall.timeoutMs).toBe(3000);
+    expect(config.recall.minScore).toBeUndefined();
+    expect(config.recall.includeCategory).toBe(true);
+  });
+
+  test("rejects unknown keys in capture", () => {
+    expect(() => {
+      mem0ConfigSchema.parse({ capture: { badKey: true } });
+    }).toThrow("unknown keys");
+  });
+
+  test("rejects unknown keys in recall", () => {
+    expect(() => {
+      mem0ConfigSchema.parse({ recall: { badKey: true } });
+    }).toThrow("unknown keys");
+  });
+});
+
+// ============================================================================
+// detectCategory
+// ============================================================================
+
+describe("detectCategory", () => {
+  test("detects preference", () => {
+    expect(detectCategory("I prefer dark mode")).toBe("preference");
+    expect(detectCategory("I always want verbose output")).toBe("preference");
+    expect(detectCategory("I love TypeScript")).toBe("preference");
+  });
+
+  test("detects contact info", () => {
+    expect(detectCategory("My email is test@example.com")).toBe("contact");
+    expect(detectCategory("Call me at +1234567890123")).toBe("contact");
+  });
+
+  test("detects decision", () => {
+    expect(detectCategory("We decided to use TypeScript")).toBe("decision");
+    expect(detectCategory("We agreed on the API design")).toBe("decision");
+  });
+
+  test("detects fact", () => {
+    expect(detectCategory("My name is John Smith")).toBe("fact");
+    expect(detectCategory("She lives in San Francisco")).toBe("fact");
+  });
+
+  test("detects skill", () => {
+    expect(detectCategory("I can use Kubernetes")).toBe("skill");
+    expect(detectCategory("She knows how to deploy to AWS")).toBe("skill");
+  });
+
+  test("detects relationship", () => {
+    expect(detectCategory("My colleague helped me")).toBe("relationship");
+    expect(detectCategory("I work with the platform team")).toBe("relationship");
+  });
+
+  test("falls back to context for unrecognized text", () => {
+    expect(detectCategory("The sky was clear and bright today")).toBe("context");
+  });
+});
+
+// ============================================================================
+// truncateAtSentence
+// ============================================================================
+
+describe("truncateAtSentence", () => {
+  test("returns text unchanged when under limit", () => {
+    expect(truncateAtSentence("Short text.", 300)).toBe("Short text.");
+  });
+
+  test("truncates at sentence boundary", () => {
+    const text = "First sentence. Second sentence. Third sentence is very long indeed.";
+    const result = truncateAtSentence(text, 35);
+    expect(result).toBe("First sentence. Second sentence.");
+    expect(result.length).toBeLessThanOrEqual(35);
+  });
+
+  test("falls back to word boundary when no sentence end found", () => {
+    const text = "One very long sentence without any periods at all continuing on and on forever";
+    const result = truncateAtSentence(text, 40);
+    expect(result.length).toBeLessThanOrEqual(40);
+    // Should cut at a word boundary (no partial words)
+    expect(text.startsWith(result)).toBe(true);
+    expect(result).toBe("One very long sentence without any");
+  });
+
+  test("handles text with only one sentence", () => {
+    const text = "A very long single sentence that keeps going and does not end with a period";
+    const result = truncateAtSentence(text, 30);
+    expect(result.length).toBeLessThanOrEqual(30);
   });
 });
 

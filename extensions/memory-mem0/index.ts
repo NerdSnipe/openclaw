@@ -17,6 +17,7 @@ import { execSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringEnum } from "openclaw/plugin-sdk";
+import type { MemoryCategory } from "./config.js";
 import { Mem0ApiClient } from "./client.js";
 import { mem0ConfigSchema } from "./config.js";
 
@@ -42,8 +43,14 @@ const MEMORY_TRIGGERS = [
   /always|never|important/i,
 ];
 
-function shouldCapture(text: string): boolean {
-  if (text.length < 10 || text.length > 500) {
+/**
+ * Check whether a message fragment should be auto-captured.
+ * Accepts an optional `maxChars` ceiling (default 500); input up to
+ * 3x that limit is allowed (it will be truncated at storage time).
+ */
+function shouldCapture(text: string, maxChars = 500): boolean {
+  // Allow input up to 3x the configured limit; truncation happens at storage.
+  if (text.length < 10 || text.length > maxChars * 3) {
     return false;
   }
   if (text.includes("<relevant-memories>")) {
@@ -60,6 +67,91 @@ function shouldCapture(text: string): boolean {
     return false;
   }
   return MEMORY_TRIGGERS.some((r) => r.test(text));
+}
+
+// ============================================================================
+// Category detection
+// ============================================================================
+
+const CATEGORY_PATTERNS: ReadonlyArray<{ category: MemoryCategory; patterns: RegExp[] }> = [
+  {
+    category: "preference",
+    patterns: [
+      /i (prefer|like|love|hate|want|need)/i,
+      /prefer|radši|nechci|preferuji/i,
+      /dark mode|light mode|theme|font|editor|layout/i,
+      /always|never/i,
+    ],
+  },
+  {
+    category: "contact",
+    patterns: [/\+\d{10,}/, /[\w.-]+@[\w.-]+\.\w+/, /phone|email|address|contact/i],
+  },
+  {
+    category: "decision",
+    patterns: [
+      /decided|chose|we.*(will|are going to)|rozhodli|budeme/i,
+      /decision|agreed|settled on/i,
+    ],
+  },
+  {
+    category: "fact",
+    patterns: [/my\s+\w+\s+is|is\s+my|můj\s+\w+\s+je/i, /born|birthday|age|lives? in|works? at/i],
+  },
+  {
+    category: "skill",
+    patterns: [
+      /can (use|code|write|build|deploy)/i,
+      /know(s)? (how to|about)/i,
+      /experience with|proficient in/i,
+    ],
+  },
+  {
+    category: "relationship",
+    patterns: [
+      /\b(wife|husband|partner|friend|colleague|boss|manager|team)\b/i,
+      /works? with|reports? to/i,
+    ],
+  },
+];
+
+/** Detect the most likely category for a memory text. Falls back to "context". */
+export function detectCategory(text: string): MemoryCategory {
+  for (const { category, patterns } of CATEGORY_PATTERNS) {
+    if (patterns.some((p) => p.test(text))) {
+      return category;
+    }
+  }
+  return "context";
+}
+
+// ============================================================================
+// Sentence-aware truncation
+// ============================================================================
+
+/** Truncate text at the nearest sentence boundary without exceeding maxChars. */
+export function truncateAtSentence(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  const truncated = text.slice(0, maxChars);
+  // Find the last sentence-ending punctuation followed by a space or newline
+  const lastSentenceEnd = Math.max(
+    truncated.lastIndexOf(". "),
+    truncated.lastIndexOf("! "),
+    truncated.lastIndexOf("? "),
+    truncated.lastIndexOf(".\n"),
+  );
+  // Only use sentence boundary if it preserves >50% of allowed length
+  if (lastSentenceEnd > maxChars * 0.5) {
+    return truncated.slice(0, lastSentenceEnd + 1).trim();
+  }
+  // Fallback: truncate at word boundary
+  const lastSpace = truncated.lastIndexOf(" ");
+  if (lastSpace > maxChars * 0.5) {
+    return truncated.slice(0, lastSpace).trim();
+  }
+  return truncated.trim();
 }
 
 // ============================================================================
@@ -139,10 +231,11 @@ const mem0Plugin = {
           }
 
           const text = results
-            .map(
-              (r, i) =>
-                `${i + 1}. [${r.source ?? "unknown"}] ${r.memory} (${r.score != null ? `${(r.score * 100).toFixed(0)}%` : "n/a"})`,
-            )
+            .map((r, i) => {
+              const category = r.metadata?.category as string | undefined;
+              const tag = category ?? r.source ?? "unknown";
+              return `${i + 1}. [${tag}] ${r.memory} (${r.score != null ? `${(r.score * 100).toFixed(0)}%` : "n/a"})`;
+            })
             .join("\n");
 
           return {
@@ -172,7 +265,7 @@ const mem0Plugin = {
         name: "memory_store",
         label: "Memory Store",
         description:
-          "Save important information in memory. Stores in Redis short-term first; frequently accessed memories are automatically promoted to long-term (Qdrant vector + Neo4j graph) storage.",
+          "Save important information in memory. Keep memories concise: one fact, preference, or decision per memory, ideally under 300 characters. Longer text is truncated at sentence boundary. Stores in Redis short-term first; frequently accessed memories are automatically promoted to long-term (Qdrant vector + Neo4j graph) storage.",
         parameters: Type.Object({
           text: Type.String({ description: "Information to remember" }),
           scope: Type.Optional(
@@ -182,15 +275,24 @@ const mem0Plugin = {
           ),
         }),
         async execute(_toolCallId, params) {
-          const { text, scope = "user" } = params as {
+          const { text: rawText, scope = "user" } = params as {
             text: string;
             scope?: (typeof STORE_SCOPES)[number];
           };
+
+          // Enforce max memory length (truncate at sentence boundary)
+          const text = truncateAtSentence(rawText, cfg.capture.maxMemoryChars);
+          // Detect category if enabled
+          const category = cfg.capture.categorize ? detectCategory(text) : undefined;
 
           const result = await client.addMemory({
             messages: [{ role: "user", content: text }],
             userId: scope === "user" ? (cfg.userId ?? "default") : undefined,
             agentId: scope === "agent" ? (cfg.agentId ?? "openclaw") : undefined,
+            metadata: {
+              ...(category ? { category } : {}),
+              source: "tool",
+            },
           });
 
           if (!result.success) {
@@ -204,14 +306,16 @@ const mem0Plugin = {
             content: [
               {
                 type: "text",
-                text: `Stored: "${text.slice(0, 100)}${text.length > 100 ? "..." : ""}"`,
+                text: `Stored${category ? ` [${category}]` : ""}: "${text.slice(0, 100)}${text.length > 100 ? "..." : ""}"`,
               },
             ],
             details: {
               action: "created",
+              category,
               shortTerm: result.short_term,
               longTerm: result.long_term,
               memoryKey: result.memory_key,
+              truncated: rawText.length !== text.length,
             },
           };
         },
@@ -555,21 +659,69 @@ const mem0Plugin = {
         }
 
         try {
-          const results = await client.search({
-            query: event.prompt,
-            limit: 3,
-            userId: cfg.userId ?? "default",
-          });
+          // Timeout-guarded search via AbortController
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), cfg.recall.timeoutMs);
+
+          let results: Awaited<ReturnType<typeof client.search>>;
+          try {
+            results = await client.search({
+              query: event.prompt,
+              limit: cfg.recall.limit,
+              userId: cfg.userId ?? "default",
+              signal: controller.signal,
+            });
+          } catch (err) {
+            if (controller.signal.aborted) {
+              api.logger.warn(
+                `memory-mem0: recall timed out after ${cfg.recall.timeoutMs}ms, skipping`,
+              );
+              return;
+            }
+            throw err;
+          } finally {
+            clearTimeout(timeoutId);
+          }
 
           if (results.length === 0) {
             return;
           }
 
-          const memoryContext = results
-            .map((r) => `- [${r.source ?? "memory"}] ${r.memory}`)
-            .join("\n");
+          // Filter by minimum relevance score if configured
+          if (cfg.recall.minScore != null) {
+            results = results.filter((r) => r.score == null || r.score >= cfg.recall.minScore!);
+          }
 
-          api.logger.info?.(`memory-mem0: injecting ${results.length} memories into context`);
+          if (results.length === 0) {
+            return;
+          }
+
+          // Build memory lines with optional category tags
+          let memoryLines = results.map((r) => {
+            const category = r.metadata?.category as string | undefined;
+            const tag = cfg.recall.includeCategory && category ? category : (r.source ?? "memory");
+            return `- [${tag}] ${r.memory}`;
+          });
+
+          // Context size guard: enforce maxContextChars
+          let totalChars = memoryLines.reduce((sum, l) => sum + l.length + 1, 0);
+          if (totalChars > cfg.recall.maxContextChars) {
+            // Drop lowest-relevance (last) memories until under limit
+            while (memoryLines.length > 1 && totalChars > cfg.recall.maxContextChars) {
+              const removed = memoryLines.pop()!;
+              totalChars -= removed.length + 1;
+            }
+            // If the single remaining memory is still too long, hard truncate
+            if (totalChars > cfg.recall.maxContextChars && memoryLines.length === 1) {
+              memoryLines[0] = memoryLines[0].slice(0, cfg.recall.maxContextChars - 4) + "...";
+            }
+          }
+
+          const memoryContext = memoryLines.join("\n");
+
+          api.logger.info?.(
+            `memory-mem0: injecting ${memoryLines.length} memories (${memoryContext.length} chars) into context`,
+          );
 
           return {
             prependContext: `<relevant-memories>\nThe following memories may be relevant to this conversation:\n${memoryContext}\n</relevant-memories>`,
@@ -623,19 +775,28 @@ const mem0Plugin = {
           }
 
           // Filter for capturable content
-          const toCapture = texts.filter((text) => text && shouldCapture(text));
+          const toCapture = texts.filter(
+            (text) => text && shouldCapture(text, cfg.capture.maxMemoryChars),
+          );
           if (toCapture.length === 0) {
             return;
           }
 
-          // Store each capturable piece (limit to 3 per conversation)
+          // Store each capturable piece, truncated and categorized
           let stored = 0;
-          for (const text of toCapture.slice(0, 3)) {
+          for (const rawText of toCapture.slice(0, cfg.capture.maxPerConversation)) {
             try {
+              const text = truncateAtSentence(rawText, cfg.capture.maxMemoryChars);
+              const category = cfg.capture.categorize ? detectCategory(text) : undefined;
+
               await client.addMemory({
                 messages: [{ role: "user", content: text }],
                 userId: cfg.userId ?? "default",
                 agentId: cfg.agentId ?? "openclaw",
+                metadata: {
+                  ...(category ? { category } : {}),
+                  source: "auto-capture",
+                },
               });
               stored++;
             } catch (err) {

@@ -140,6 +140,8 @@ export class Mem0ApiClient {
     sessionId?: string;
     limit?: number;
     includeShortTerm?: boolean;
+    /** Optional AbortSignal for caller-controlled timeout. */
+    signal?: AbortSignal;
   }): Promise<Mem0SearchResult[]> {
     const data = await this.request<{ memories: Mem0SearchResult[]; count: number }>(
       "/memories/search",
@@ -153,6 +155,7 @@ export class Mem0ApiClient {
           limit: params.limit ?? 10,
           include_short_term: params.includeShortTerm ?? true,
         }),
+        signal: params.signal,
       },
     );
     return data.memories;
@@ -282,8 +285,11 @@ export class Mem0ApiClient {
 
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
     const url = `${this.baseUrl}${path}`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15_000);
+    // Use caller-provided signal if present; otherwise create a default 15s timeout.
+    const externalSignal = options?.signal;
+    const controller = externalSignal ? undefined : new AbortController();
+    const timeoutId = controller ? setTimeout(() => controller.abort(), 15_000) : undefined;
+    const signal = externalSignal ?? controller!.signal;
 
     try {
       const headers: Record<string, string> = {
@@ -292,7 +298,7 @@ export class Mem0ApiClient {
       };
       const response = await fetch(url, {
         ...options,
-        signal: controller.signal,
+        signal,
         headers,
       });
 
@@ -305,7 +311,9 @@ export class Mem0ApiClient {
 
       return (await response.json()) as T;
     } finally {
-      clearTimeout(timeoutId);
+      if (timeoutId != null) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 }
