@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringEnum } from "openclaw/plugin-sdk";
 import type { MemoryCategory } from "./config.js";
-import { Mem0ApiClient } from "./client.js";
+import { Mem0ApiClient, type Mem0AddResult } from "./client.js";
 import { mem0ConfigSchema } from "./config.js";
 
 // ============================================================================
@@ -33,35 +33,52 @@ const STORE_SCOPES = ["user", "agent"] as const;
 // ============================================================================
 
 const MEMORY_TRIGGERS = [
-  /remember|zapamatuj si|pamatuj/i,
-  /prefer|radši|nechci|preferuji/i,
-  /decided|rozhodli jsme|budeme používat/i,
+  /\b(remember|zapamatuj si|pamatuj)\b/i,
+  /\b(i prefer|i'd prefer|radši|nechci|preferuji)\b/i,
+  /\b(decided|rozhodli jsme|budeme používat)\b/i,
   /\+\d{10,}/,
   /[\w.-]+@[\w.-]+\.\w+/,
   /my\s+\w+\s+is|is\s+my|můj\s+\w+\s+je|je\s+můj/i,
-  /i (like|prefer|hate|love|want|need)/i,
-  /always|never|important/i,
+  /\bi (like|prefer|hate|love|want|need)\b/i,
+];
+
+/** Phrases at the start of a message that indicate transient/procedural text, not memories. */
+const TRANSIENT_PREFIXES = [
+  /^(I'll|Let me|Here's|I'm going to|Sure,|OK,|Okay,|I can|I've|I will|Let's)/i,
+  /^(Searching|Looking|Reading|Checking|Running|Updating|Creating|Generating)/i,
 ];
 
 /**
  * Check whether a message fragment should be auto-captured.
  * Accepts an optional `maxChars` ceiling (default 500); input up to
  * 3x that limit is allowed (it will be truncated at storage time).
+ * Only user messages should be passed here (assistant messages are filtered upstream).
  */
 function shouldCapture(text: string, maxChars = 500): boolean {
-  // Allow input up to 3x the configured limit; truncation happens at storage.
-  if (text.length < 10 || text.length > maxChars * 3) {
+  // Too short or too long
+  if (text.length < 20 || text.length > maxChars * 3) {
     return false;
   }
+  // Questions are not memories
+  if (text.trimEnd().endsWith("?")) {
+    return false;
+  }
+  // Skip transient/procedural phrases
+  if (TRANSIENT_PREFIXES.some((r) => r.test(text))) {
+    return false;
+  }
+  // Skip XML-like content
   if (text.includes("<relevant-memories>")) {
     return false;
   }
   if (text.startsWith("<") && text.includes("</")) {
     return false;
   }
+  // Skip formatted/structured content (markdown lists)
   if (text.includes("**") && text.includes("\n-")) {
     return false;
   }
+  // Skip emoji-heavy content
   const emojiCount = (text.match(/[\u{1F300}-\u{1F9FF}]/gu) || []).length;
   if (emojiCount > 3) {
     return false;
@@ -155,6 +172,51 @@ export function truncateAtSentence(text: string, maxChars: number): string {
 }
 
 // ============================================================================
+// Timeout helper
+// ============================================================================
+
+/** Wrap an async operation with an AbortController timeout. Returns `fallback` on timeout. */
+async function withToolTimeout<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+  logger?: { warn: (msg: string) => void },
+  label?: string,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fn(controller.signal);
+  } catch (err) {
+    if (controller.signal.aborted) {
+      logger?.warn(`memory-mem0: ${label ?? "operation"} timed out after ${timeoutMs}ms`);
+      return fallback;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ============================================================================
+// System prompt guidance for the agent
+// ============================================================================
+
+const MEM0_SYSTEM_PROMPT = `## Memory (mem0)
+You have access to a persistent memory system. Use it proactively:
+
+- **memory_recall**: Search memories for context about user preferences, past decisions, or previously discussed topics. Use BEFORE answering questions about prior work, preferences, dates, people, or decisions.
+- **memory_store**: Save important information — preferences, decisions, contact details, project context. Keep each memory concise: one fact per memory, under 300 characters. Do NOT store transient information (task progress, current actions, greetings).
+- **memory_forget**: Delete specific memories by ID or search query. Use for corrections or GDPR requests.
+- **memory_promote**: Promote frequently accessed short-term memories to permanent long-term storage.
+
+When relevant memories are injected in <relevant-memories>, reference them naturally in your response.`;
+
+// Tool-level timeout for memory operations (ms)
+const TOOL_TIMEOUT_MS = 5_000;
+const CAPTURE_TIMEOUT_MS = 3_000;
+
+// ============================================================================
 // Plugin Definition
 // ============================================================================
 
@@ -221,7 +283,13 @@ const mem0Plugin = {
             searchParams.agentId = cfg.agentId ?? "openclaw";
           }
 
-          const results = await client.search(searchParams);
+          const results = await withToolTimeout(
+            (signal) => client.search({ ...searchParams, signal }),
+            TOOL_TIMEOUT_MS,
+            [] as Awaited<ReturnType<typeof client.search>>,
+            api.logger,
+            "memory_recall",
+          );
 
           if (results.length === 0) {
             return {
@@ -285,15 +353,23 @@ const mem0Plugin = {
           // Detect category if enabled
           const category = cfg.capture.categorize ? detectCategory(text) : undefined;
 
-          const result = await client.addMemory({
-            messages: [{ role: "user", content: text }],
-            userId: scope === "user" ? (cfg.userId ?? "default") : undefined,
-            agentId: scope === "agent" ? (cfg.agentId ?? "openclaw") : undefined,
-            metadata: {
-              ...(category ? { category } : {}),
-              source: "tool",
-            },
-          });
+          const result = await withToolTimeout(
+            (signal) =>
+              client.addMemory({
+                messages: [{ role: "user", content: text }],
+                userId: scope === "user" ? (cfg.userId ?? "default") : undefined,
+                agentId: scope === "agent" ? (cfg.agentId ?? "openclaw") : undefined,
+                metadata: {
+                  ...(category ? { category } : {}),
+                  source: "tool",
+                },
+                signal,
+              }),
+            TOOL_TIMEOUT_MS,
+            { success: false, short_term: false, long_term: false } as Mem0AddResult,
+            api.logger,
+            "memory_store",
+          );
 
           if (!result.success) {
             return {
@@ -344,7 +420,13 @@ const mem0Plugin = {
           };
 
           if (memoryId) {
-            await client.deleteMemory(memoryId);
+            await withToolTimeout(
+              (signal) => client.deleteMemory(memoryId, signal),
+              TOOL_TIMEOUT_MS,
+              { success: false, deleted: "" },
+              api.logger,
+              "memory_forget",
+            );
             return {
               content: [{ type: "text", text: `Memory ${memoryId} forgotten.` }],
               details: { action: "deleted", id: memoryId },
@@ -352,7 +434,13 @@ const mem0Plugin = {
           }
 
           if (query) {
-            const results = await client.search({ query, limit: 5 });
+            const results = await withToolTimeout(
+              (signal) => client.search({ query, limit: 5, signal }),
+              TOOL_TIMEOUT_MS,
+              [] as Awaited<ReturnType<typeof client.search>>,
+              api.logger,
+              "memory_forget:search",
+            );
 
             if (results.length === 0) {
               return {
@@ -363,7 +451,13 @@ const mem0Plugin = {
 
             // Auto-delete if single high-confidence match
             if (results.length === 1 && results[0].score != null && results[0].score > 0.9) {
-              await client.deleteMemory(results[0].id);
+              await withToolTimeout(
+                (signal) => client.deleteMemory(results[0].id, signal),
+                TOOL_TIMEOUT_MS,
+                { success: false, deleted: "" },
+                api.logger,
+                "memory_forget:delete",
+              );
               return {
                 content: [
                   {
@@ -414,7 +508,13 @@ const mem0Plugin = {
           "Promote frequently accessed short-term memories to long-term storage. Memories accessed 3+ times in Redis are promoted to Qdrant vector + Neo4j graph storage for permanent recall.",
         parameters: Type.Object({}),
         async execute(_toolCallId, _params) {
-          const result = await client.promote(cfg.userId ?? "default");
+          const result = await withToolTimeout(
+            () => client.promote(cfg.userId ?? "default"),
+            TOOL_TIMEOUT_MS,
+            { promoted_count: 0, promoted: [] } as Awaited<ReturnType<typeof client.promote>>,
+            api.logger,
+            "memory_promote",
+          );
           return {
             content: [
               {
@@ -653,88 +753,76 @@ const mem0Plugin = {
     // Lifecycle Hooks
     // ========================================================================
 
-    // Auto-recall: inject relevant memories before agent starts
-    if (cfg.autoRecall) {
-      api.on("before_agent_start", async (event) => {
-        if (!event.prompt || event.prompt.length < 5) {
-          return;
-        }
+    // Always inject system prompt guidance so the agent knows about memory tools.
+    // Conditionally include auto-recall (memory search) when autoRecall is enabled.
+    api.on("before_agent_start", async (event) => {
+      // Always provide system prompt guidance for memory tools
+      const result: { systemPrompt: string; prependContext?: string } = {
+        systemPrompt: MEM0_SYSTEM_PROMPT,
+      };
 
+      // Auto-recall: search for relevant memories and inject as context
+      if (cfg.autoRecall && event.prompt && event.prompt.length >= 5) {
         try {
-          // Timeout-guarded search via AbortController
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), cfg.recall.timeoutMs);
+          const recallResults = await withToolTimeout(
+            (signal) =>
+              client.search({
+                query: event.prompt,
+                limit: cfg.recall.limit,
+                userId: cfg.userId ?? "default",
+                signal,
+              }),
+            cfg.recall.timeoutMs,
+            [] as Awaited<ReturnType<typeof client.search>>,
+            api.logger,
+            "auto-recall",
+          );
 
-          let results: Awaited<ReturnType<typeof client.search>>;
-          try {
-            results = await client.search({
-              query: event.prompt,
-              limit: cfg.recall.limit,
-              userId: cfg.userId ?? "default",
-              signal: controller.signal,
-            });
-          } catch (err) {
-            if (controller.signal.aborted) {
-              api.logger.warn(
-                `memory-mem0: recall timed out after ${cfg.recall.timeoutMs}ms, skipping`,
-              );
-              return;
-            }
-            throw err;
-          } finally {
-            clearTimeout(timeoutId);
-          }
-
-          if (results.length === 0) {
-            return;
-          }
+          let results = recallResults;
 
           // Filter by minimum relevance score if configured
-          if (cfg.recall.minScore != null) {
+          if (results.length > 0 && cfg.recall.minScore != null) {
             results = results.filter((r) => r.score == null || r.score >= cfg.recall.minScore!);
           }
 
-          if (results.length === 0) {
-            return;
-          }
+          if (results.length > 0) {
+            // Build memory lines with optional category tags
+            let memoryLines = results.map((r) => {
+              const category = r.metadata?.category as string | undefined;
+              const tag =
+                cfg.recall.includeCategory && category ? category : (r.source ?? "memory");
+              return `- [${tag}] ${r.memory}`;
+            });
 
-          // Build memory lines with optional category tags
-          let memoryLines = results.map((r) => {
-            const category = r.metadata?.category as string | undefined;
-            const tag = cfg.recall.includeCategory && category ? category : (r.source ?? "memory");
-            return `- [${tag}] ${r.memory}`;
-          });
-
-          // Context size guard: enforce maxContextChars
-          let totalChars = memoryLines.reduce((sum, l) => sum + l.length + 1, 0);
-          if (totalChars > cfg.recall.maxContextChars) {
-            // Drop lowest-relevance (last) memories until under limit
-            while (memoryLines.length > 1 && totalChars > cfg.recall.maxContextChars) {
-              const removed = memoryLines.pop()!;
-              totalChars -= removed.length + 1;
+            // Context size guard: enforce maxContextChars
+            let totalChars = memoryLines.reduce((sum, l) => sum + l.length + 1, 0);
+            if (totalChars > cfg.recall.maxContextChars) {
+              while (memoryLines.length > 1 && totalChars > cfg.recall.maxContextChars) {
+                const removed = memoryLines.pop()!;
+                totalChars -= removed.length + 1;
+              }
+              if (totalChars > cfg.recall.maxContextChars && memoryLines.length === 1) {
+                memoryLines[0] = memoryLines[0].slice(0, cfg.recall.maxContextChars - 4) + "...";
+              }
             }
-            // If the single remaining memory is still too long, hard truncate
-            if (totalChars > cfg.recall.maxContextChars && memoryLines.length === 1) {
-              memoryLines[0] = memoryLines[0].slice(0, cfg.recall.maxContextChars - 4) + "...";
-            }
+
+            const memoryContext = memoryLines.join("\n");
+
+            api.logger.info?.(
+              `memory-mem0: injecting ${memoryLines.length} memories (${memoryContext.length} chars) into context`,
+            );
+
+            result.prependContext = `<relevant-memories>\nThe following memories may be relevant to this conversation:\n${memoryContext}\n</relevant-memories>`;
           }
-
-          const memoryContext = memoryLines.join("\n");
-
-          api.logger.info?.(
-            `memory-mem0: injecting ${memoryLines.length} memories (${memoryContext.length} chars) into context`,
-          );
-
-          return {
-            prependContext: `<relevant-memories>\nThe following memories may be relevant to this conversation:\n${memoryContext}\n</relevant-memories>`,
-          };
         } catch (err) {
           api.logger.warn(`memory-mem0: recall failed: ${String(err)}`);
         }
-      });
-    }
+      }
 
-    // Auto-capture: analyze and store important information after agent ends
+      return result;
+    });
+
+    // Auto-capture: analyze and store important user messages after agent ends
     if (cfg.autoCapture) {
       api.on("agent_end", async (event) => {
         if (!event.success || !event.messages || event.messages.length === 0) {
@@ -742,7 +830,8 @@ const mem0Plugin = {
         }
 
         try {
-          // Extract text content from messages (handling unknown[] type)
+          // Extract text content from USER messages only.
+          // Assistant messages mostly contain procedural acknowledgments, not preferences.
           const texts: string[] = [];
           for (const msg of event.messages) {
             if (!msg || typeof msg !== "object") {
@@ -750,7 +839,7 @@ const mem0Plugin = {
             }
             const msgObj = msg as Record<string, unknown>;
             const role = msgObj.role;
-            if (role !== "user" && role !== "assistant") {
+            if (role !== "user") {
               continue;
             }
 
@@ -784,23 +873,33 @@ const mem0Plugin = {
             return;
           }
 
-          // Store each capturable piece, truncated and categorized
+          // Store each capturable piece, truncated and categorized (with timeout)
           let stored = 0;
           for (const rawText of toCapture.slice(0, cfg.capture.maxPerConversation)) {
             try {
               const text = truncateAtSentence(rawText, cfg.capture.maxMemoryChars);
               const category = cfg.capture.categorize ? detectCategory(text) : undefined;
 
-              await client.addMemory({
-                messages: [{ role: "user", content: text }],
-                userId: cfg.userId ?? "default",
-                agentId: cfg.agentId ?? "openclaw",
-                metadata: {
-                  ...(category ? { category } : {}),
-                  source: "auto-capture",
-                },
-              });
-              stored++;
+              const result = await withToolTimeout(
+                (signal) =>
+                  client.addMemory({
+                    messages: [{ role: "user", content: text }],
+                    userId: cfg.userId ?? "default",
+                    agentId: cfg.agentId ?? "openclaw",
+                    metadata: {
+                      ...(category ? { category } : {}),
+                      source: "auto-capture",
+                    },
+                    signal,
+                  }),
+                CAPTURE_TIMEOUT_MS,
+                { success: false, short_term: false, long_term: false } as Mem0AddResult,
+                api.logger,
+                "auto-capture",
+              );
+              if (result.success) {
+                stored++;
+              }
             } catch (err) {
               api.logger.warn(`memory-mem0: failed to store capture: ${String(err)}`);
             }
@@ -813,7 +912,13 @@ const mem0Plugin = {
           // Optionally trigger promotion after capture
           if (cfg.autoPromote) {
             try {
-              await client.promote(cfg.userId ?? "default");
+              await withToolTimeout(
+                () => client.promote(cfg.userId ?? "default"),
+                CAPTURE_TIMEOUT_MS,
+                { promoted_count: 0, promoted: [] } as Awaited<ReturnType<typeof client.promote>>,
+                api.logger,
+                "auto-promote",
+              );
             } catch {
               // Promotion failure is non-critical
             }

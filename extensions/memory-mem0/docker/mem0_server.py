@@ -23,6 +23,7 @@ LLM/Embedder Configuration (via environment variables):
 
 import os
 import json
+import time
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -97,6 +98,9 @@ memory: Optional[Memory] = None
 SHORT_TERM_TTL_HOURS = 24  # Keep in Redis for 24 hours
 SHORT_TERM_PREFIX = "stm:"  # Short-term memory prefix
 PROMOTION_THRESHOLD = 3  # Promote after accessed 3+ times
+
+# Embedder health check cache (avoid generating embedding on every Docker healthcheck)
+_embedder_cache: Dict[str, Any] = {"ok": None, "info": {}, "expires": 0.0}
 
 
 def create_database():
@@ -360,19 +364,27 @@ async def health_check():
         except:
             pass
 
-    # Test embedder: can it actually produce a vector?
-    embedder_ok = False
-    embedder_info = {}
-    if memory:
-        try:
-            test_vector = memory.embedding_model.embed("health check")
-            if test_vector and len(test_vector) > 0:
-                embedder_ok = True
-                embedder_info = {"dims": len(test_vector)}
-            else:
-                embedder_info = {"error": "returned empty vector"}
-        except Exception as e:
-            embedder_info = {"error": str(e)[:200]}
+    # Test embedder (cached for 5 minutes to avoid slow healthchecks)
+    now = time.time()
+    if now < _embedder_cache["expires"]:
+        embedder_ok = _embedder_cache["ok"]
+        embedder_info = _embedder_cache["info"]
+    else:
+        embedder_ok = False
+        embedder_info = {}
+        if memory:
+            try:
+                test_vector = memory.embedding_model.embed("health check")
+                if test_vector and len(test_vector) > 0:
+                    embedder_ok = True
+                    embedder_info = {"dims": len(test_vector)}
+                else:
+                    embedder_info = {"error": "returned empty vector"}
+            except Exception as e:
+                embedder_info = {"error": str(e)[:200]}
+        _embedder_cache["ok"] = embedder_ok
+        _embedder_cache["info"] = embedder_info
+        _embedder_cache["expires"] = now + 300  # Cache for 5 minutes
 
     all_healthy = postgres_ok and redis_ok and memory and embedder_ok
 
@@ -396,6 +408,7 @@ async def add_memory(request: AddMemoryRequest, background_tasks: BackgroundTask
     By default, stores in Redis first (fast), then background promotes to long-term.
     Set short_term_only=True to keep only in Redis (ephemeral working memory).
     """
+    start_time = time.time()
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
     # Log incoming request with our metadata (category, source, etc.)
@@ -461,6 +474,9 @@ async def add_memory(request: AddMemoryRequest, background_tasks: BackgroundTask
             else:
                 logger.error(f"Long-term memory error: {e}")
 
+    elapsed = time.time() - start_time
+    logger.info(f"add_memory completed in {elapsed:.2f}s (short_term={redis_stored}, long_term={long_term_result is not None})")
+
     return {
         "success": True,
         "short_term": redis_stored,
@@ -477,6 +493,7 @@ async def search_memories(request: SearchRequest):
 
     Results are merged and ranked, with short-term memories boosted for recency.
     """
+    start_time = time.time()
     results = []
 
     # Search short-term memory (Redis)
@@ -533,12 +550,18 @@ async def search_memories(request: SearchRequest):
     # Sort by score descending
     results.sort(key=lambda x: x.score or 0, reverse=True)
 
+    elapsed = time.time() - start_time
+    final = results[:request.limit]
+    short_count = sum(1 for r in final if r.source == "short_term")
+    long_count = sum(1 for r in final if r.source == "long_term")
+    logger.info(f"search completed in {elapsed:.2f}s (query={request.query!r:.50}, results={len(final)}, short={short_count}, long={long_count})")
+
     return {
-        "memories": results[:request.limit],
-        "count": len(results[:request.limit]),
+        "memories": final,
+        "count": len(final),
         "sources": {
-            "short_term": sum(1 for r in results if r.source == "short_term"),
-            "long_term": sum(1 for r in results if r.source == "long_term"),
+            "short_term": short_count,
+            "long_term": long_count,
         }
     }
 

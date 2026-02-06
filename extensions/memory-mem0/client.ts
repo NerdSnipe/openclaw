@@ -119,6 +119,8 @@ export class Mem0ApiClient {
     sessionId?: string;
     metadata?: Record<string, unknown>;
     shortTermOnly?: boolean;
+    /** Optional AbortSignal for caller-controlled timeout. */
+    signal?: AbortSignal;
   }): Promise<Mem0AddResult> {
     return this.request<Mem0AddResult>("/memories/add", {
       method: "POST",
@@ -130,6 +132,7 @@ export class Mem0ApiClient {
         metadata: params.metadata,
         short_term_only: params.shortTermOnly ?? false,
       }),
+      signal: params.signal,
     });
   }
 
@@ -186,10 +189,13 @@ export class Mem0ApiClient {
     return data.memories;
   }
 
-  async deleteMemory(memoryId: string): Promise<{ success: boolean; deleted: string }> {
+  async deleteMemory(
+    memoryId: string,
+    signal?: AbortSignal,
+  ): Promise<{ success: boolean; deleted: string }> {
     return this.request<{ success: boolean; deleted: string }>(
       `/memories/${encodeURIComponent(memoryId)}`,
-      { method: "DELETE" },
+      { method: "DELETE", signal },
     );
   }
 

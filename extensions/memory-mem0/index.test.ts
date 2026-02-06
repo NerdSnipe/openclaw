@@ -184,7 +184,7 @@ describe("memory-mem0 plugin", () => {
     expect(logs.some((l) => l.includes("memory-mem0: plugin registered"))).toBe(true);
   });
 
-  test("plugin skips hooks when auto features disabled", async () => {
+  test("plugin always registers before_agent_start for system prompt, skips agent_end when autoCapture disabled", async () => {
     const { default: mem0Plugin } = await import("./index.js");
 
     // oxlint-disable-next-line typescript/no-explicit-any
@@ -223,48 +223,89 @@ describe("memory-mem0 plugin", () => {
     // oxlint-disable-next-line typescript/no-explicit-any
     mem0Plugin.register(mockApi as any);
 
-    // No hooks registered when both features are off
-    expect(registeredHooks["before_agent_start"]).toBeUndefined();
+    // before_agent_start always registered (for system prompt injection)
+    expect(registeredHooks["before_agent_start"]?.length).toBe(1);
+    // agent_end NOT registered when autoCapture is off
     expect(registeredHooks["agent_end"]).toBeUndefined();
   });
 
   test("shouldCapture filters correctly", () => {
-    // Replicate the capture filtering logic to verify patterns
-    const triggers = [
-      { text: "I prefer dark mode", shouldMatch: true },
-      { text: "Remember that my name is John", shouldMatch: true },
-      { text: "My email is test@example.com", shouldMatch: true },
-      { text: "Call me at +1234567890123", shouldMatch: true },
-      { text: "We decided to use TypeScript", shouldMatch: true },
-      { text: "I always want verbose output", shouldMatch: true },
-      { text: "Just a random short message", shouldMatch: false },
-      { text: "x", shouldMatch: false }, // Too short
-      {
-        text: "<relevant-memories>injected</relevant-memories>",
-        shouldMatch: false,
-      },
-    ];
-
+    // Replicate the updated capture filtering logic to verify patterns
     const MEMORY_TRIGGERS_TEST = [
-      /remember|zapamatuj si|pamatuj/i,
-      /prefer|radši|nechci|preferuji/i,
-      /decided|rozhodli jsme|budeme používat/i,
+      /\b(remember|zapamatuj si|pamatuj)\b/i,
+      /\b(i prefer|i'd prefer|radši|nechci|preferuji)\b/i,
+      /\b(decided|rozhodli jsme|budeme používat)\b/i,
       /\+\d{10,}/,
       /[\w.-]+@[\w.-]+\.\w+/,
       /my\s+\w+\s+is|is\s+my|můj\s+\w+\s+je|je\s+můj/i,
-      /i (like|prefer|hate|love|want|need)/i,
-      /always|never|important/i,
+      /\bi (like|prefer|hate|love|want|need)\b/i,
     ];
 
-    for (const { text, shouldMatch } of triggers) {
-      const isTooShort = text.length < 10;
-      const isInjected = text.includes("<relevant-memories>");
-      const matches = !isTooShort && !isInjected && MEMORY_TRIGGERS_TEST.some((r) => r.test(text));
+    const TRANSIENT_PREFIXES_TEST = [
+      /^(I'll|Let me|Here's|I'm going to|Sure,|OK,|Okay,|I can|I've|I will|Let's)/i,
+      /^(Searching|Looking|Reading|Checking|Running|Updating|Creating|Generating)/i,
+    ];
 
-      if (shouldMatch) {
-        expect(matches, `expected "${text}" to be capturable`).toBe(true);
-      }
+    function testShouldCapture(text: string, maxChars = 500): boolean {
+      if (text.length < 20 || text.length > maxChars * 3) return false;
+      if (text.trimEnd().endsWith("?")) return false;
+      if (TRANSIENT_PREFIXES_TEST.some((r) => r.test(text))) return false;
+      if (text.includes("<relevant-memories>")) return false;
+      if (text.startsWith("<") && text.includes("</")) return false;
+      if (text.includes("**") && text.includes("\n-")) return false;
+      const emojiCount = (text.match(/[\u{1F300}-\u{1F9FF}]/gu) || []).length;
+      if (emojiCount > 3) return false;
+      return MEMORY_TRIGGERS_TEST.some((r) => r.test(text));
     }
+
+    // Should match (positive cases)
+    expect(testShouldCapture("I prefer dark mode for my editor"), "prefer").toBe(true);
+    expect(testShouldCapture("Remember that my name is John Smith"), "remember").toBe(true);
+    expect(testShouldCapture("My email is test@example.com and I use it daily"), "email").toBe(
+      true,
+    );
+    expect(testShouldCapture("Call me at +1234567890123 anytime"), "phone").toBe(true);
+    expect(testShouldCapture("We decided to use TypeScript for the project"), "decided").toBe(true);
+    expect(testShouldCapture("I like using Vim keybindings always"), "i like").toBe(true);
+    expect(testShouldCapture("My name is John Smith"), "my name is").toBe(true);
+
+    // Should NOT match (negative cases)
+    expect(testShouldCapture("x"), "too short").toBe(false);
+    expect(testShouldCapture("short msg"), "too short 2").toBe(false);
+    expect(testShouldCapture("<relevant-memories>injected</relevant-memories>"), "injected").toBe(
+      false,
+    );
+    expect(testShouldCapture("Just a random message here"), "no trigger").toBe(false);
+
+    // "always"/"never" no longer triggers — was too broad
+    expect(
+      testShouldCapture("The function always returns a value"),
+      "always in random context",
+    ).toBe(false);
+    expect(testShouldCapture("That is never going to work well"), "never in random context").toBe(
+      false,
+    );
+    expect(
+      testShouldCapture("This is important for the project"),
+      "important in random context",
+    ).toBe(false);
+
+    // Questions are not memories
+    expect(testShouldCapture("Do you remember my name?"), "question").toBe(false);
+    expect(testShouldCapture("What do I prefer for editors?"), "question 2").toBe(false);
+
+    // Transient phrases are not memories
+    expect(testShouldCapture("I'll look into that preference for you"), "transient I'll").toBe(
+      false,
+    );
+    expect(testShouldCapture("Let me check your preferences now"), "transient Let me").toBe(false);
+    expect(testShouldCapture("Sure, I remember that detail about you"), "transient Sure").toBe(
+      false,
+    );
+    expect(
+      testShouldCapture("Searching for relevant memory matches now"),
+      "transient Searching",
+    ).toBe(false);
   });
 });
 
