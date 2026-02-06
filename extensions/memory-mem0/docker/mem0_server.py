@@ -360,7 +360,21 @@ async def health_check():
         except:
             pass
 
-    all_healthy = postgres_ok and redis_ok and memory
+    # Test embedder: can it actually produce a vector?
+    embedder_ok = False
+    embedder_info = {}
+    if memory:
+        try:
+            test_vector = memory.embedding_model.embed("health check")
+            if test_vector and len(test_vector) > 0:
+                embedder_ok = True
+                embedder_info = {"dims": len(test_vector)}
+            else:
+                embedder_info = {"error": "returned empty vector"}
+        except Exception as e:
+            embedder_info = {"error": str(e)[:200]}
+
+    all_healthy = postgres_ok and redis_ok and memory and embedder_ok
 
     return {
         "status": "healthy" if all_healthy else "degraded",
@@ -369,6 +383,8 @@ async def health_check():
         "short_term_memory": "connected" if redis_ok else "unavailable",
         "long_term_memory": "connected" if memory else "unavailable",
         "graph_memory": "connected" if memory else "unavailable",
+        "embedder": "connected" if embedder_ok else "unavailable",
+        "embedder_details": embedder_info,
     }
 
 
@@ -381,6 +397,9 @@ async def add_memory(request: AddMemoryRequest, background_tasks: BackgroundTask
     Set short_term_only=True to keep only in Redis (ephemeral working memory).
     """
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
+
+    # Log incoming request with our metadata (category, source, etc.)
+    logger.info(f"Adding memory: user={request.user_id}, agent={request.agent_id}, metadata={request.metadata}")
 
     # Generate a unique key for this memory
     import hashlib
@@ -432,7 +451,15 @@ async def add_memory(request: AddMemoryRequest, background_tasks: BackgroundTask
                 extra_data={"result": str(long_term_result)[:500]}
             )
         except Exception as e:
-            logger.error(f"Long-term memory error: {e}")
+            error_msg = str(e)
+            if "PointStruct" in error_msg or "vector" in error_msg.lower():
+                logger.error(
+                    "Long-term storage failed: embedder returned no vector. "
+                    "Check your embedder config (provider, model, API key/Ollama URL). "
+                    f"Detail: {e}"
+                )
+            else:
+                logger.error(f"Long-term memory error: {e}")
 
     return {
         "success": True,
