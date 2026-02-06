@@ -12,7 +12,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - ~/.openclaw/memory/data/postgres:/var/lib/postgresql/data
     environment:
       - POSTGRES_USER=mem0
       - POSTGRES_PASSWORD=mem0password
@@ -32,7 +32,7 @@ services:
       - "6379:6379" # Redis
       - "8001:8001" # RedisInsight UI
     volumes:
-      - ./data/redis:/data
+      - ~/.openclaw/memory/data/redis:/data
     environment:
       - REDIS_ARGS=--save 60 1 --loglevel warning
     restart: unless-stopped
@@ -50,7 +50,7 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - ./data/qdrant:/qdrant/storage
+      - ~/.openclaw/memory/data/qdrant:/qdrant/storage
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
     restart: unless-stopped
@@ -65,8 +65,8 @@ services:
       - "7474:7474" # HTTP
       - "7687:7687" # Bolt
     volumes:
-      - ./data/neo4j/data:/data
-      - ./data/neo4j/logs:/logs
+      - ~/.openclaw/memory/data/neo4j/data:/data
+      - ~/.openclaw/memory/data/neo4j/logs:/logs
     environment:
       - NEO4J_AUTH=neo4j/mem0password
       - NEO4J_PLUGINS=["apoc"]
@@ -94,10 +94,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
 
-      # Embedder provider/model (configurable)
-      - MEM0_EMBEDDER_PROVIDER=${MEM0_EMBEDDER_PROVIDER:-openai}
-      - MEM0_EMBEDDER_MODEL=${MEM0_EMBEDDER_MODEL:-text-embedding-3-small}
-      - MEM0_EMBEDDING_DIMS=${MEM0_EMBEDDING_DIMS:-1536}
+      # Embedder provider/model (configurable — Ollama recommended)
+      - MEM0_EMBEDDER_PROVIDER=${MEM0_EMBEDDER_PROVIDER:-ollama}
+      - MEM0_EMBEDDER_MODEL=${MEM0_EMBEDDER_MODEL:-nomic-embed-text:v1.5}
+      - MEM0_EMBEDDING_DIMS=${MEM0_EMBEDDING_DIMS:-768}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
       # Postgres connection (history, metadata, structured data)
@@ -136,8 +136,8 @@ services:
       timeout: 10s
       retries: 3
 
-# Volumes mapped to local filesystem for easy backup and visibility
-# All data stored in: ~/.openclaw/workspace/memory/data/
+# Volumes mapped to ~/.openclaw/memory/data/ for persistence
+# independent of the git repo checkout.
 
 networks:
   default:

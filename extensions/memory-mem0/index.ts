@@ -545,9 +545,10 @@ const mem0Plugin = {
           .action(() => {
             const dockerDir = resolveDockerDir();
             try {
-              execSync(`docker compose -f "${join(dockerDir, "docker-compose.yml")}" up -d`, {
-                stdio: "inherit",
-              });
+              execSync(
+                `docker compose -f "${join(dockerDir, "docker-compose.yml")}" --env-file "${join(dockerDir, ".env")}" up -d`,
+                { stdio: "inherit" },
+              );
             } catch (err) {
               console.error(`Failed to start Docker stack: ${String(err)}`);
             }
@@ -559,9 +560,10 @@ const mem0Plugin = {
           .action(() => {
             const dockerDir = resolveDockerDir();
             try {
-              execSync(`docker compose -f "${join(dockerDir, "docker-compose.yml")}" down`, {
-                stdio: "inherit",
-              });
+              execSync(
+                `docker compose -f "${join(dockerDir, "docker-compose.yml")}" --env-file "${join(dockerDir, ".env")}" down`,
+                { stdio: "inherit" },
+              );
             } catch (err) {
               console.error(`Failed to stop Docker stack: ${String(err)}`);
             }

@@ -1,0 +1,5 @@
+# Docker persistent data (now stored at ~/.openclaw/memory/data/)
+data/
+
+# User-specific env (contains API keys)
+.env

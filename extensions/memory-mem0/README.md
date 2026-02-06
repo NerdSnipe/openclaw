@@ -34,14 +34,21 @@ cd ~/.openclaw/extensions/memory-mem0 && pnpm install
 ## Prerequisites
 
 - Docker and Docker Compose
-- An OpenAI API key (default) or alternative provider key (Gemini, Ollama)
+- An OpenAI API key for LLM fact extraction
+- [Ollama](https://ollama.com) with `nomic-embed-text:v1.5` for local embeddings (recommended), or an OpenAI key for cloud embeddings
 
 ## Quick Start
 
 ```bash
+# Pull the embedding model (one-time)
+ollama pull nomic-embed-text:v1.5
+
+# Configure the Docker stack
 cd extensions/memory-mem0/docker
 cp .env.example .env
-# Edit .env — set OPENAI_API_KEY (or alternative provider)
+# Edit .env — set OPENAI_API_KEY (do NOT wrap in quotes)
+
+# Start the stack
 docker compose up -d
 ```
 
@@ -86,16 +93,16 @@ Put under `plugins.entries.memory-mem0.config`:
 
 ## Docker Environment Variables
 
-| Variable                 | Default                  | Description                            |
-| ------------------------ | ------------------------ | -------------------------------------- |
-| `OPENAI_API_KEY`         | —                        | Required for OpenAI provider           |
-| `MEM0_LLM_PROVIDER`      | `openai`                 | LLM provider: `openai`, `google`       |
-| `MEM0_LLM_MODEL`         | `gpt-4o-mini`            | LLM model for fact extraction          |
-| `MEM0_EMBEDDER_PROVIDER` | `openai`                 | Embedder: `openai`, `ollama`, `google` |
-| `MEM0_EMBEDDER_MODEL`    | `text-embedding-3-small` | Embedding model                        |
-| `MEM0_EMBEDDING_DIMS`    | `1536`                   | Embedding dimensions                   |
-| `GEMINI_API_KEY`         | —                        | Required for Google/Gemini provider    |
-| `OLLAMA_BASE_URL`        | —                        | Required for Ollama provider           |
+| Variable                 | Default                             | Description                             |
+| ------------------------ | ----------------------------------- | --------------------------------------- |
+| `OPENAI_API_KEY`         | —                                   | Required for OpenAI LLM provider        |
+| `MEM0_LLM_PROVIDER`      | `openai`                            | LLM provider: `openai`, `google`        |
+| `MEM0_LLM_MODEL`         | `gpt-4o-mini`                       | LLM model for fact extraction           |
+| `MEM0_EMBEDDER_PROVIDER` | `ollama`                            | Embedder: `ollama`, `openai`, `google`  |
+| `MEM0_EMBEDDER_MODEL`    | `nomic-embed-text:v1.5`             | Embedding model                         |
+| `MEM0_EMBEDDING_DIMS`    | `768`                               | Embedding dimensions (must match model) |
+| `OLLAMA_BASE_URL`        | `http://host.docker.internal:11434` | Ollama URL (Docker host access)         |
+| `GEMINI_API_KEY`         | —                                   | Required for Google/Gemini provider     |
 
 ## Tools
 
@@ -142,6 +149,18 @@ The plugin enforces memory quality at multiple levels:
 ## Migrating Workspace Memory
 
 See [MIGRATION.md](./MIGRATION.md) for a complete guide on migrating your existing workspace memories (`MEMORY.md`, `memory/*.md`) into mem0 — both via automated CLI and agent-driven approaches.
+
+## Data Storage
+
+All persistent data (Postgres, Redis, Qdrant, Neo4j) is stored at `~/.openclaw/memory/data/`. This location is independent of the plugin source code — your memories persist even if you remove the git repo or switch workspaces.
+
+```
+~/.openclaw/memory/data/
+  postgres/    # Audit logs, profiles, metadata
+  redis/       # Short-term memory cache snapshots
+  qdrant/      # Long-term vector embeddings
+  neo4j/       # Graph relationships
+```
 
 ## Notes
 
