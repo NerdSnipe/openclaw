@@ -148,9 +148,11 @@ def build_mem0_config() -> dict:
     embedder_provider = os.environ.get("MEM0_EMBEDDER_PROVIDER", "openai")
     embedder_model = os.environ.get("MEM0_EMBEDDER_MODEL", "text-embedding-3-small")
     embedding_dims = int(os.environ.get("MEM0_EMBEDDING_DIMS", "1536"))
+    enable_graph = os.environ.get("MEM0_ENABLE_GRAPH", "false").lower() == "true"
 
     logger.info(f"LLM: provider={llm_provider}, model={llm_model}")
     logger.info(f"Embedder: provider={embedder_provider}, model={embedder_model}, dims={embedding_dims}")
+    logger.info(f"Graph store: {'enabled' if enable_graph else 'disabled'}")
 
     # Build LLM config
     llm_config: Dict[str, Any] = {
@@ -191,15 +193,20 @@ def build_mem0_config() -> dict:
                 "embedding_model_dims": embedding_dims,
             },
         },
-        "graph_store": {
+    }
+
+    # Graph store is optional — adds ~21s per write due to additional LLM calls.
+    # Enable with MEM0_ENABLE_GRAPH=true when entity relationships are needed.
+    if enable_graph:
+        config["graph_store"] = {
             "provider": "neo4j",
             "config": {
                 "url": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
                 "username": os.environ.get("NEO4J_USERNAME", "neo4j"),
                 "password": os.environ.get("NEO4J_PASSWORD", "mem0password"),
             },
-        },
-    }
+        }
+
     return config
 
 
@@ -386,18 +393,20 @@ async def health_check():
         _embedder_cache["info"] = embedder_info
         _embedder_cache["expires"] = now + 300  # Cache for 5 minutes
 
+    enable_graph = os.environ.get("MEM0_ENABLE_GRAPH", "false").lower() == "true"
     all_healthy = postgres_ok and redis_ok and memory and embedder_ok
 
-    return {
+    result = {
         "status": "healthy" if all_healthy else "degraded",
         "service": "mem0-api",
         "database": "connected" if postgres_ok else "unavailable",
         "short_term_memory": "connected" if redis_ok else "unavailable",
         "long_term_memory": "connected" if memory else "unavailable",
-        "graph_memory": "connected" if memory else "unavailable",
+        "graph_memory": "connected" if (memory and enable_graph) else ("disabled" if not enable_graph else "unavailable"),
         "embedder": "connected" if embedder_ok else "unavailable",
         "embedder_details": embedder_info,
     }
+    return result
 
 
 @app.post("/memories/add")

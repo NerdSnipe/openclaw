@@ -100,6 +100,10 @@ services:
       - MEM0_EMBEDDING_DIMS=${MEM0_EMBEDDING_DIMS:-768}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
+      # Graph store (Neo4j) — disabled by default (adds ~21s per write).
+      # Enable with MEM0_ENABLE_GRAPH=true when entity relationships are needed.
+      - MEM0_ENABLE_GRAPH=${MEM0_ENABLE_GRAPH:-false}
+
       # Postgres connection (history, metadata, structured data)
       - DATABASE_URL=postgresql://mem0:mem0password@postgres:5432/mem0
 

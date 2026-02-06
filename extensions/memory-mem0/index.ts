@@ -353,23 +353,54 @@ const mem0Plugin = {
           // Detect category if enabled
           const category = cfg.capture.categorize ? detectCategory(text) : undefined;
 
-          const result = await withToolTimeout(
-            (signal) =>
-              client.addMemory({
-                messages: [{ role: "user", content: text }],
-                userId: scope === "user" ? (cfg.userId ?? "default") : undefined,
-                agentId: scope === "agent" ? (cfg.agentId ?? "openclaw") : undefined,
-                metadata: {
-                  ...(category ? { category } : {}),
-                  source: "tool",
-                },
-                signal,
-              }),
-            TOOL_TIMEOUT_MS,
-            { success: false, short_term: false, long_term: false } as Mem0AddResult,
-            api.logger,
-            "memory_store",
-          );
+          const memoryParams = {
+            messages: [{ role: "user", content: text }] as Array<{
+              role: string;
+              content: string;
+            }>,
+            userId: scope === "user" ? (cfg.userId ?? "default") : undefined,
+            agentId: scope === "agent" ? (cfg.agentId ?? "openclaw") : undefined,
+            metadata: {
+              ...(category ? { category } : {}),
+              source: "tool" as const,
+            },
+          };
+
+          // Fast path: store in Redis short-term first (< 1s), return immediately.
+          // Long-term ingestion (LLM fact extraction + embeddings) runs in background.
+          const result = cfg.store.backgroundLongTerm
+            ? await withToolTimeout(
+                (signal) =>
+                  client.addMemory({
+                    ...memoryParams,
+                    shortTermOnly: true,
+                    signal,
+                  }),
+                cfg.store.timeoutMs,
+                { success: false, short_term: false, long_term: false } as Mem0AddResult,
+                api.logger,
+                "memory_store",
+              )
+            : await withToolTimeout(
+                (signal) =>
+                  client.addMemory({
+                    ...memoryParams,
+                    signal,
+                  }),
+                cfg.store.timeoutMs,
+                { success: false, short_term: false, long_term: false } as Mem0AddResult,
+                api.logger,
+                "memory_store",
+              );
+
+          // Fire-and-forget long-term ingestion in background (non-blocking)
+          if (cfg.store.backgroundLongTerm && result.success) {
+            client
+              .addMemory({ ...memoryParams, shortTermOnly: false })
+              .catch((err) =>
+                api.logger.warn(`memory-mem0: background long-term store failed: ${String(err)}`),
+              );
+          }
 
           if (!result.success) {
             return {
@@ -389,7 +420,7 @@ const mem0Plugin = {
               action: "created",
               category,
               shortTerm: result.short_term,
-              longTerm: result.long_term,
+              longTerm: result.long_term || cfg.store.backgroundLongTerm,
               memoryKey: result.memory_key,
               truncated: rawText.length !== text.length,
             },
@@ -873,23 +904,33 @@ const mem0Plugin = {
             return;
           }
 
-          // Store each capturable piece, truncated and categorized (with timeout)
+          // Store each capturable piece, truncated and categorized.
+          // Fast path: Redis short-term first, background long-term.
           let stored = 0;
           for (const rawText of toCapture.slice(0, cfg.capture.maxPerConversation)) {
             try {
               const text = truncateAtSentence(rawText, cfg.capture.maxMemoryChars);
               const category = cfg.capture.categorize ? detectCategory(text) : undefined;
 
+              const captureParams = {
+                messages: [{ role: "user", content: text }] as Array<{
+                  role: string;
+                  content: string;
+                }>,
+                userId: cfg.userId ?? "default",
+                agentId: cfg.agentId ?? "openclaw",
+                metadata: {
+                  ...(category ? { category } : {}),
+                  source: "auto-capture" as const,
+                },
+              };
+
+              // Store short-term (fast) with timeout
               const result = await withToolTimeout(
                 (signal) =>
                   client.addMemory({
-                    messages: [{ role: "user", content: text }],
-                    userId: cfg.userId ?? "default",
-                    agentId: cfg.agentId ?? "openclaw",
-                    metadata: {
-                      ...(category ? { category } : {}),
-                      source: "auto-capture",
-                    },
+                    ...captureParams,
+                    shortTermOnly: true,
                     signal,
                   }),
                 CAPTURE_TIMEOUT_MS,
@@ -899,6 +940,14 @@ const mem0Plugin = {
               );
               if (result.success) {
                 stored++;
+                // Background long-term ingestion (non-blocking)
+                client
+                  .addMemory({ ...captureParams, shortTermOnly: false })
+                  .catch((err) =>
+                    api.logger.warn(
+                      `memory-mem0: background long-term capture failed: ${String(err)}`,
+                    ),
+                  );
               }
             } catch (err) {
               api.logger.warn(`memory-mem0: failed to store capture: ${String(err)}`);

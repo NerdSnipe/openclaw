@@ -291,10 +291,11 @@ export class Mem0ApiClient {
 
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
     const url = `${this.baseUrl}${path}`;
-    // Use caller-provided signal if present; otherwise create a default 15s timeout.
+    // Use caller-provided signal if present; otherwise create a default 60s timeout.
+    // Long-term ingestion (LLM fact extraction + embeddings) can take 10-30s.
     const externalSignal = options?.signal;
     const controller = externalSignal ? undefined : new AbortController();
-    const timeoutId = controller ? setTimeout(() => controller.abort(), 15_000) : undefined;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), 60_000) : undefined;
     const signal = externalSignal ?? controller!.signal;
 
     try {

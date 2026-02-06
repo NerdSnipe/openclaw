@@ -27,6 +27,14 @@ export type Mem0Config = {
     /** Auto-detect memory category from content (default: true). */
     categorize: boolean;
   };
+  /** Tool-level storage controls for memory_store. */
+  store: {
+    /** Timeout in ms for the synchronous Redis store (default: 5000). */
+    timeoutMs: number;
+    /** Store to Redis immediately, then ingest long-term in background (default: true).
+     * When false, the tool waits for the full pipeline (LLM + embeddings + vector store). */
+    backgroundLongTerm: boolean;
+  };
   /** Recall/injection controls for the before_agent_start hook. */
   recall: {
     /** Max memories injected into context (default: 3). */
@@ -48,6 +56,9 @@ const DEFAULT_SEARCH_THRESHOLD = 0.3;
 
 const DEFAULT_MAX_MEMORY_CHARS = 300;
 const DEFAULT_MAX_PER_CONVERSATION = 3;
+
+const DEFAULT_STORE_TIMEOUT_MS = 5000;
+const DEFAULT_BACKGROUND_LONG_TERM = true;
 
 const DEFAULT_RECALL_LIMIT = 3;
 const DEFAULT_MAX_CONTEXT_CHARS = 1500;
@@ -77,6 +88,11 @@ const DEFAULT_CAPTURE = {
   categorize: true,
 } as const;
 
+const DEFAULT_STORE = {
+  timeoutMs: DEFAULT_STORE_TIMEOUT_MS,
+  backgroundLongTerm: DEFAULT_BACKGROUND_LONG_TERM,
+} as const;
+
 const DEFAULT_RECALL = {
   limit: DEFAULT_RECALL_LIMIT,
   maxContextChars: DEFAULT_MAX_CONTEXT_CHARS,
@@ -99,6 +115,18 @@ function parseCapture(raw: unknown): Mem0Config["capture"] {
         ? c.maxPerConversation
         : DEFAULT_MAX_PER_CONVERSATION,
     categorize: c.categorize !== false,
+  };
+}
+
+function parseStore(raw: unknown): Mem0Config["store"] {
+  if (!raw || typeof raw !== "object") {
+    return { ...DEFAULT_STORE };
+  }
+  const s = raw as Record<string, unknown>;
+  assertAllowedKeys(s, ["timeoutMs", "backgroundLongTerm"], "store");
+  return {
+    timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : DEFAULT_STORE_TIMEOUT_MS,
+    backgroundLongTerm: s.backgroundLongTerm !== false,
   };
 }
 
@@ -136,6 +164,7 @@ export const mem0ConfigSchema = {
           threshold: DEFAULT_SEARCH_THRESHOLD,
         },
         capture: { ...DEFAULT_CAPTURE },
+        store: { ...DEFAULT_STORE },
         recall: { ...DEFAULT_RECALL },
       };
     }
@@ -151,6 +180,7 @@ export const mem0ConfigSchema = {
         "autoPromote",
         "searchDefaults",
         "capture",
+        "store",
         "recall",
       ],
       "memory-mem0 config",
@@ -184,6 +214,7 @@ export const mem0ConfigSchema = {
         threshold: searchThreshold,
       },
       capture: parseCapture(cfg.capture),
+      store: parseStore(cfg.store),
       recall: parseRecall(cfg.recall),
     };
   },
@@ -240,6 +271,17 @@ export const mem0ConfigSchema = {
     "capture.categorize": {
       label: "Auto-Categorize",
       help: "Automatically detect and tag memory category (preference, fact, decision, etc.)",
+      advanced: true,
+    },
+    "store.timeoutMs": {
+      label: "Store Timeout (ms)",
+      placeholder: String(DEFAULT_STORE_TIMEOUT_MS),
+      help: "Timeout for the fast Redis store path. Long-term ingestion runs in background.",
+      advanced: true,
+    },
+    "store.backgroundLongTerm": {
+      label: "Background Long-Term",
+      help: "Store to Redis instantly, then ingest into long-term storage asynchronously. Disable to wait for full pipeline.",
       advanced: true,
     },
     "recall.limit": {

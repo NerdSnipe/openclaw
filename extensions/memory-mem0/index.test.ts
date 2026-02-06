@@ -313,15 +313,18 @@ describe("memory-mem0 plugin", () => {
 // Config: capture + recall parsing
 // ============================================================================
 
-describe("config schema: capture + recall", () => {
-  test("parses custom capture and recall values", () => {
+describe("config schema: capture + store + recall", () => {
+  test("parses custom capture, store, and recall values", () => {
     const config = mem0ConfigSchema.parse({
       capture: { maxMemoryChars: 200, maxPerConversation: 5, categorize: false },
+      store: { timeoutMs: 10000, backgroundLongTerm: false },
       recall: { limit: 5, maxContextChars: 2000, timeoutMs: 5000, minScore: 0.5 },
     });
     expect(config.capture.maxMemoryChars).toBe(200);
     expect(config.capture.maxPerConversation).toBe(5);
     expect(config.capture.categorize).toBe(false);
+    expect(config.store.timeoutMs).toBe(10000);
+    expect(config.store.backgroundLongTerm).toBe(false);
     expect(config.recall.limit).toBe(5);
     expect(config.recall.maxContextChars).toBe(2000);
     expect(config.recall.timeoutMs).toBe(5000);
@@ -329,11 +332,13 @@ describe("config schema: capture + recall", () => {
     expect(config.recall.includeCategory).toBe(true);
   });
 
-  test("defaults capture and recall when absent", () => {
+  test("defaults capture, store, and recall when absent", () => {
     const config = mem0ConfigSchema.parse({});
     expect(config.capture.maxMemoryChars).toBe(300);
     expect(config.capture.maxPerConversation).toBe(3);
     expect(config.capture.categorize).toBe(true);
+    expect(config.store.timeoutMs).toBe(5000);
+    expect(config.store.backgroundLongTerm).toBe(true);
     expect(config.recall.limit).toBe(3);
     expect(config.recall.maxContextChars).toBe(1500);
     expect(config.recall.timeoutMs).toBe(3000);
@@ -341,9 +346,21 @@ describe("config schema: capture + recall", () => {
     expect(config.recall.includeCategory).toBe(true);
   });
 
+  test("store defaults when no config provided", () => {
+    const config = mem0ConfigSchema.parse(undefined);
+    expect(config.store.timeoutMs).toBe(5000);
+    expect(config.store.backgroundLongTerm).toBe(true);
+  });
+
   test("rejects unknown keys in capture", () => {
     expect(() => {
       mem0ConfigSchema.parse({ capture: { badKey: true } });
+    }).toThrow("unknown keys");
+  });
+
+  test("rejects unknown keys in store", () => {
+    expect(() => {
+      mem0ConfigSchema.parse({ store: { badKey: true } });
     }).toThrow("unknown keys");
   });
 
