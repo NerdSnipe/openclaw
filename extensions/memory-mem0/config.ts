@@ -5,7 +5,8 @@ export type MemoryCategory =
   | "contact"
   | "skill"
   | "relationship"
-  | "context";
+  | "context"
+  | "session_summary";
 
 export type Mem0Config = {
   apiUrl: string;
@@ -48,6 +49,15 @@ export type Mem0Config = {
     /** Prefix injected memories with their [category] tag (default: true). */
     includeCategory: boolean;
   };
+  /** Session continuity: summarize sessions and recall context on greeting. */
+  sessionContinuity: {
+    /** Enable auto-capture of session summaries at agent_end (default: true). */
+    enabled: boolean;
+    /** Max characters for the session summary (default: 250). */
+    maxSummaryChars: number;
+    /** Minimum user messages in a session before a summary is captured (default: 4). */
+    minMessages: number;
+  };
 };
 
 const DEFAULT_API_URL = "http://localhost:8080";
@@ -63,6 +73,9 @@ const DEFAULT_BACKGROUND_LONG_TERM = true;
 const DEFAULT_RECALL_LIMIT = 3;
 const DEFAULT_MAX_CONTEXT_CHARS = 1500;
 const DEFAULT_RECALL_TIMEOUT_MS = 3000;
+
+const DEFAULT_SESSION_CONTINUITY_MAX_CHARS = 250;
+const DEFAULT_SESSION_CONTINUITY_MIN_MESSAGES = 4;
 
 function resolveEnvVars(value: string): string {
   return value.replace(/\$\{([^}]+)\}/g, (_, envVar) => {
@@ -99,6 +112,12 @@ const DEFAULT_RECALL = {
   timeoutMs: DEFAULT_RECALL_TIMEOUT_MS,
   minScore: undefined,
   includeCategory: true,
+} as const;
+
+const DEFAULT_SESSION_CONTINUITY = {
+  enabled: true,
+  maxSummaryChars: DEFAULT_SESSION_CONTINUITY_MAX_CHARS,
+  minMessages: DEFAULT_SESSION_CONTINUITY_MIN_MESSAGES,
 } as const;
 
 function parseCapture(raw: unknown): Mem0Config["capture"] {
@@ -150,6 +169,23 @@ function parseRecall(raw: unknown): Mem0Config["recall"] {
   };
 }
 
+function parseSessionContinuity(raw: unknown): Mem0Config["sessionContinuity"] {
+  if (!raw || typeof raw !== "object") {
+    return { ...DEFAULT_SESSION_CONTINUITY };
+  }
+  const s = raw as Record<string, unknown>;
+  assertAllowedKeys(s, ["enabled", "maxSummaryChars", "minMessages"], "sessionContinuity");
+  return {
+    enabled: s.enabled !== false,
+    maxSummaryChars:
+      typeof s.maxSummaryChars === "number"
+        ? s.maxSummaryChars
+        : DEFAULT_SESSION_CONTINUITY_MAX_CHARS,
+    minMessages:
+      typeof s.minMessages === "number" ? s.minMessages : DEFAULT_SESSION_CONTINUITY_MIN_MESSAGES,
+  };
+}
+
 export const mem0ConfigSchema = {
   parse(value: unknown): Mem0Config {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -166,6 +202,7 @@ export const mem0ConfigSchema = {
         capture: { ...DEFAULT_CAPTURE },
         store: { ...DEFAULT_STORE },
         recall: { ...DEFAULT_RECALL },
+        sessionContinuity: { ...DEFAULT_SESSION_CONTINUITY },
       };
     }
     const cfg = value as Record<string, unknown>;
@@ -182,6 +219,7 @@ export const mem0ConfigSchema = {
         "capture",
         "store",
         "recall",
+        "sessionContinuity",
       ],
       "memory-mem0 config",
     );
@@ -216,6 +254,7 @@ export const mem0ConfigSchema = {
       capture: parseCapture(cfg.capture),
       store: parseStore(cfg.store),
       recall: parseRecall(cfg.recall),
+      sessionContinuity: parseSessionContinuity(cfg.sessionContinuity),
     };
   },
   uiHints: {
@@ -310,6 +349,22 @@ export const mem0ConfigSchema = {
     "recall.includeCategory": {
       label: "Show Category Tags",
       help: "Prefix injected memories with their category tag (e.g. [preference], [decision])",
+      advanced: true,
+    },
+    "sessionContinuity.enabled": {
+      label: "Session Continuity",
+      help: "Automatically summarize sessions and recall context when greeting after /new or /reset",
+    },
+    "sessionContinuity.maxSummaryChars": {
+      label: "Max Summary Length",
+      placeholder: String(DEFAULT_SESSION_CONTINUITY_MAX_CHARS),
+      help: "Maximum characters for the auto-captured session summary",
+      advanced: true,
+    },
+    "sessionContinuity.minMessages": {
+      label: "Min Messages for Summary",
+      placeholder: String(DEFAULT_SESSION_CONTINUITY_MIN_MESSAGES),
+      help: "Minimum user messages before a session summary is captured",
       advanced: true,
     },
   },

@@ -172,6 +172,76 @@ export function truncateAtSentence(text: string, maxChars: number): string {
 }
 
 // ============================================================================
+// Session continuity helpers
+// ============================================================================
+
+/**
+ * Detect whether the current prompt is a bare /new or /reset greeting.
+ * Matches the distinctive fragment from BARE_SESSION_RESET_PROMPT in core.
+ */
+export function isSessionResetPrompt(prompt: string): boolean {
+  return prompt.includes("new session was started via /new");
+}
+
+/** Extract text from a message object (handles string and content-block arrays). */
+function extractMessageText(msg: unknown): string | null {
+  if (!msg || typeof msg !== "object") return null;
+  const m = msg as Record<string, unknown>;
+  const content = m.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (
+        block &&
+        typeof block === "object" &&
+        (block as Record<string, unknown>).type === "text" &&
+        typeof (block as Record<string, unknown>).text === "string"
+      ) {
+        return (block as Record<string, unknown>).text as string;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a concise "bookend" session summary from conversation messages.
+ * Captures the first substantive user topic and the last, giving the next
+ * session enough context to greet with continuity.
+ * Returns null if not enough user messages to summarize.
+ */
+export function buildSessionSummary(
+  messages: unknown[],
+  maxChars: number,
+  minMessages: number,
+): string | null {
+  const userTexts: string[] = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") continue;
+    const m = msg as Record<string, unknown>;
+    if (m.role !== "user") continue;
+    const text = extractMessageText(msg);
+    if (!text || text.length < 10) continue;
+    // Skip the greeting prompt itself and injected context
+    if (text.includes("new session was started via /new")) continue;
+    if (text.startsWith("<")) continue;
+    userTexts.push(text);
+  }
+
+  if (userTexts.length < minMessages) return null;
+
+  // Bookend: first topic + last topic
+  const first = truncateAtSentence(userTexts[0], 120);
+  const last =
+    userTexts.length > 1 ? truncateAtSentence(userTexts[userTexts.length - 1], 120) : null;
+
+  let summary = `Started with: ${first}`;
+  if (last) summary += ` | Ended with: ${last}`;
+
+  return truncateAtSentence(summary, maxChars);
+}
+
+// ============================================================================
 // Timeout helper
 // ============================================================================
 
@@ -793,27 +863,45 @@ const mem0Plugin = {
       // Always provide system prompt guidance for memory tools
       contextParts.push(MEM0_SYSTEM_PROMPT);
 
+      const isGreeting = isSessionResetPrompt(event.prompt);
+
       // Auto-recall: search for relevant memories and inject as context
       if (cfg.autoRecall && event.prompt && event.prompt.length >= 5) {
         try {
+          // For greetings, use a topic-oriented query instead of the generic prompt text
+          const searchQuery = isGreeting
+            ? "session summary recent work projects decisions"
+            : event.prompt;
+          const searchLimit = isGreeting ? 2 : cfg.recall.limit;
+
           const recallResults = await withToolTimeout(
             (signal) =>
               client.search({
-                query: event.prompt,
-                limit: cfg.recall.limit,
+                query: searchQuery,
+                limit: searchLimit,
                 userId: cfg.userId ?? "default",
                 signal,
               }),
             cfg.recall.timeoutMs,
             [] as Awaited<ReturnType<typeof client.search>>,
             api.logger,
-            "auto-recall",
+            isGreeting ? "session-continuity-recall" : "auto-recall",
           );
 
           let results = recallResults;
 
-          // Filter by minimum relevance score if configured
-          if (results.length > 0 && cfg.recall.minScore != null) {
+          // For greetings, prefer session_summary memories when available
+          if (isGreeting && results.length > 0) {
+            const summaries = results.filter(
+              (r) => (r.metadata?.category as string) === "session_summary",
+            );
+            if (summaries.length > 0) {
+              results = summaries;
+            }
+          }
+
+          // Filter by minimum relevance score if configured (skip for greetings)
+          if (!isGreeting && results.length > 0 && cfg.recall.minScore != null) {
             results = results.filter((r) => r.score == null || r.score >= cfg.recall.minScore!);
           }
 
@@ -851,6 +939,13 @@ const mem0Plugin = {
         } catch (err) {
           api.logger.warn(`memory-mem0: recall failed: ${String(err)}`);
         }
+      }
+
+      // For greetings, add continuity guidance so the agent references recalled context
+      if (isGreeting) {
+        contextParts.push(
+          `<session-continuity>\nOn session start: if relevant memories are present above, reference them naturally in your greeting. Mention what was worked on, ongoing projects, or recent decisions. Greet with continuity and context, not a blank slate.\n</session-continuity>`,
+        );
       }
 
       return { prependContext: contextParts.join("\n\n") };
@@ -977,6 +1072,65 @@ const mem0Plugin = {
           }
         } catch (err) {
           api.logger.warn(`memory-mem0: capture failed: ${String(err)}`);
+        }
+      });
+    }
+
+    // Session continuity: capture a concise session summary at agent_end
+    if (cfg.sessionContinuity.enabled) {
+      api.on("agent_end", async (event) => {
+        if (!event.success || !event.messages || event.messages.length === 0) {
+          return;
+        }
+
+        try {
+          const summary = buildSessionSummary(
+            event.messages as unknown[],
+            cfg.sessionContinuity.maxSummaryChars,
+            cfg.sessionContinuity.minMessages,
+          );
+          if (!summary) return;
+
+          const summaryParams = {
+            messages: [{ role: "user", content: summary }] as Array<{
+              role: string;
+              content: string;
+            }>,
+            userId: cfg.userId ?? "default",
+            agentId: cfg.agentId ?? "openclaw",
+            metadata: {
+              category: "session_summary" as const,
+              source: "auto-session-summary" as const,
+            },
+          };
+
+          // Store in short-term (fast) with timeout
+          const result = await withToolTimeout(
+            (signal) =>
+              client.addMemory({
+                ...summaryParams,
+                shortTermOnly: true,
+                signal,
+              }),
+            CAPTURE_TIMEOUT_MS,
+            { success: false, short_term: false, long_term: false } as Mem0AddResult,
+            api.logger,
+            "session-summary-capture",
+          );
+
+          if (result.success) {
+            api.logger.info(`memory-mem0: captured session summary (${summary.length} chars)`);
+            // Background long-term ingestion so summaries persist across Redis TTL
+            client
+              .addMemory({ ...summaryParams, shortTermOnly: false })
+              .catch((err) =>
+                api.logger.warn(
+                  `memory-mem0: background session summary long-term failed: ${String(err)}`,
+                ),
+              );
+          }
+        } catch (err) {
+          api.logger.warn(`memory-mem0: session summary capture failed: ${String(err)}`);
         }
       });
     }

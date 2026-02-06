@@ -7,7 +7,12 @@
 
 import { describe, test, expect } from "vitest";
 import { mem0ConfigSchema } from "./config.js";
-import { detectCategory, truncateAtSentence } from "./index.js";
+import {
+  detectCategory,
+  truncateAtSentence,
+  isSessionResetPrompt,
+  buildSessionSummary,
+} from "./index.js";
 
 // Live test gate
 const liveEnabled = process.env.MEM0_LIVE_TEST === "1";
@@ -176,9 +181,9 @@ describe("memory-mem0 plugin", () => {
     expect(registeredServices.length).toBe(1);
     expect(registeredServices[0].id).toBe("memory-mem0");
 
-    // 2 hooks (autoRecall + autoCapture both enabled)
+    // 3 hooks: before_agent_start (recall+guidance), agent_end (autoCapture), agent_end (sessionContinuity)
     expect(registeredHooks["before_agent_start"]?.length).toBe(1);
-    expect(registeredHooks["agent_end"]?.length).toBe(1);
+    expect(registeredHooks["agent_end"]?.length).toBe(2);
 
     // Registration log
     expect(logs.some((l) => l.includes("memory-mem0: plugin registered"))).toBe(true);
@@ -225,8 +230,8 @@ describe("memory-mem0 plugin", () => {
 
     // before_agent_start always registered (for system prompt injection)
     expect(registeredHooks["before_agent_start"]?.length).toBe(1);
-    // agent_end NOT registered when autoCapture is off
-    expect(registeredHooks["agent_end"]).toBeUndefined();
+    // agent_end: autoCapture is off, but sessionContinuity is enabled by default → 1 hook
+    expect(registeredHooks["agent_end"]?.length).toBe(1);
   });
 
   test("shouldCapture filters correctly", () => {
@@ -441,6 +446,143 @@ describe("truncateAtSentence", () => {
     const text = "A very long single sentence that keeps going and does not end with a period";
     const result = truncateAtSentence(text, 30);
     expect(result.length).toBeLessThanOrEqual(30);
+  });
+});
+
+// ============================================================================
+// Session Continuity
+// ============================================================================
+
+describe("isSessionResetPrompt", () => {
+  test("detects the bare session reset prompt", () => {
+    const prompt =
+      "A new session was started via /new or /reset. Greet the user in your configured persona, if one is provided. Be yourself - use your defined voice, mannerisms, and mood. Keep it to 1-3 sentences and ask what they want to do. If the runtime model differs from default_model in the system prompt, mention the default model. Do not mention internal steps, files, tools, or reasoning.";
+    expect(isSessionResetPrompt(prompt)).toBe(true);
+  });
+
+  test("returns false for normal user messages", () => {
+    expect(isSessionResetPrompt("What color scheme did we decide on?")).toBe(false);
+    expect(isSessionResetPrompt("I prefer dark mode")).toBe(false);
+    expect(isSessionResetPrompt("")).toBe(false);
+  });
+});
+
+describe("buildSessionSummary", () => {
+  test("builds a bookend summary from user messages", () => {
+    const messages = [
+      { role: "user", content: "Let's work on the mem0 plugin integration today" },
+      { role: "assistant", content: "Sure, I can help with that!" },
+      { role: "user", content: "The store timeout is 5 seconds but mem0 takes 30 seconds" },
+      { role: "assistant", content: "I see the issue..." },
+      { role: "user", content: "We need to use Redis short-term first then background long-term" },
+      { role: "assistant", content: "That makes sense." },
+      { role: "user", content: "I prefer the fast-path approach for all memory operations" },
+    ];
+    const summary = buildSessionSummary(messages, 250, 4);
+    expect(summary).not.toBeNull();
+    expect(summary!.length).toBeLessThanOrEqual(250);
+    expect(summary).toContain("Started with:");
+    expect(summary).toContain("Ended with:");
+  });
+
+  test("returns null when too few user messages", () => {
+    const messages = [
+      { role: "user", content: "Hello there, just a quick question" },
+      { role: "assistant", content: "Hi! How can I help?" },
+    ];
+    expect(buildSessionSummary(messages, 250, 4)).toBeNull();
+  });
+
+  test("skips the greeting prompt text", () => {
+    const messages = [
+      {
+        role: "user",
+        content:
+          "A new session was started via /new or /reset. Greet the user in your configured persona.",
+      },
+      { role: "assistant", content: "Hey! What can I help with?" },
+      { role: "user", content: "Let's debug the memory system today" },
+      { role: "assistant", content: "Sure thing!" },
+      { role: "user", content: "The auto-recall is not returning relevant results" },
+      { role: "assistant", content: "Let me check..." },
+      { role: "user", content: "We decided to use session summaries for greeting context" },
+      { role: "assistant", content: "Good approach." },
+      { role: "user", content: "I prefer to keep the summaries under 250 characters" },
+    ];
+    const summary = buildSessionSummary(messages, 250, 4);
+    expect(summary).not.toBeNull();
+    // Should not contain the greeting prompt text
+    expect(summary).not.toContain("new session was started");
+    expect(summary).toContain("Started with:");
+  });
+
+  test("skips XML-injected context", () => {
+    const messages = [
+      { role: "user", content: "<relevant-memories>some injected context</relevant-memories>" },
+      { role: "user", content: "Let's work on the API integration" },
+      { role: "assistant", content: "OK" },
+      { role: "user", content: "The endpoint needs authentication" },
+      { role: "assistant", content: "Got it" },
+      { role: "user", content: "We should use JWT tokens for the API" },
+      { role: "user", content: "I prefer stateless authentication for microservices" },
+    ];
+    const summary = buildSessionSummary(messages, 250, 4);
+    expect(summary).not.toBeNull();
+    expect(summary).not.toContain("relevant-memories");
+  });
+
+  test("handles content block arrays", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "Let's work on the database schema today" }],
+      },
+      { role: "assistant", content: "Sounds good!" },
+      { role: "user", content: [{ type: "text", text: "We need to add a users table first" }] },
+      { role: "assistant", content: "OK" },
+      {
+        role: "user",
+        content: [{ type: "text", text: "The schema should support multi-tenancy" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "I prefer using UUID primary keys for all tables" }],
+      },
+    ];
+    const summary = buildSessionSummary(messages, 250, 4);
+    expect(summary).not.toBeNull();
+    expect(summary).toContain("Started with:");
+  });
+});
+
+describe("config schema: sessionContinuity", () => {
+  test("defaults sessionContinuity when absent", () => {
+    const config = mem0ConfigSchema.parse({});
+    expect(config.sessionContinuity.enabled).toBe(true);
+    expect(config.sessionContinuity.maxSummaryChars).toBe(250);
+    expect(config.sessionContinuity.minMessages).toBe(4);
+  });
+
+  test("parses custom sessionContinuity values", () => {
+    const config = mem0ConfigSchema.parse({
+      sessionContinuity: { enabled: false, maxSummaryChars: 150, minMessages: 6 },
+    });
+    expect(config.sessionContinuity.enabled).toBe(false);
+    expect(config.sessionContinuity.maxSummaryChars).toBe(150);
+    expect(config.sessionContinuity.minMessages).toBe(6);
+  });
+
+  test("defaults sessionContinuity when no config provided", () => {
+    const config = mem0ConfigSchema.parse(undefined);
+    expect(config.sessionContinuity.enabled).toBe(true);
+    expect(config.sessionContinuity.maxSummaryChars).toBe(250);
+    expect(config.sessionContinuity.minMessages).toBe(4);
+  });
+
+  test("rejects unknown keys in sessionContinuity", () => {
+    expect(() => {
+      mem0ConfigSchema.parse({ sessionContinuity: { badKey: true } });
+    }).toThrow("unknown keys");
   });
 });
 
